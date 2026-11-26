@@ -1,0 +1,10 @@
+.DS_Store
+build/
+dist/
+src/Payload/
+src/*.o
+src/LockdownBypass
+src/ldmctl
+src/*.tipa
+src/*.ipa
+src/*.verification

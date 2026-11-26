@@ -1,0 +1,103 @@
+name: build-lockdown-bypass
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "review/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Inject git commit into Info.plist
+        run: |
+          COMMIT="$(git rev-parse --short=7 HEAD)"
+          echo "LB_COMMIT=$COMMIT" >> $GITHUB_ENV
+          plutil -replace LBGitCommit -string "$COMMIT" src/app/Info.plist || plutil -insert LBGitCommit -string "$COMMIT" src/app/Info.plist
+
+      - name: Build ldmctl root helper
+        working-directory: src
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -O2 -Wall -fobjc-arc \
+            -miphoneos-version-min=15.0 \
+            ldmctl.m \
+            -framework Foundation -lsqlite3 \
+            -o ldmctl
+          ldid -Sentitlements-helper.plist ldmctl
+
+      - name: Build LockdownBypass app (SwiftUI + ObjC Bridge)
+        working-directory: src
+        run: |
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun -sdk iphoneos clang -arch arm64 -O2 -Wall -fobjc-arc \
+            -miphoneos-version-min=15.0 \
+            -DLB_COMMIT=\"${{ env.LB_COMMIT }}\" \
+            -c app/LockdownBridge.m -o LockdownBridge.o
+          xcrun -sdk iphoneos swiftc \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -O \
+            -import-objc-header app/LockdownBridge.h \
+            LockdownBridge.o \
+            app/Models.swift \
+            app/AppViewModel.swift \
+            app/Views.swift \
+            app/AppMain.swift \
+            -Xlinker -rpath -Xlinker /usr/lib/swift \
+            -framework UIKit -framework SwiftUI -framework Foundation -framework WebKit -framework CoreGraphics \
+            -o LockdownBypass
+          rm -f LockdownBridge.o
+          ldid -Sentitlements-app.plist LockdownBypass
+
+      - name: Package LockdownBypass.tipa
+        working-directory: src
+        run: |
+          rm -rf Payload LockdownBypass.tipa LockdownBypass.tipa.verification
+          mkdir -p Payload/LockdownBypass.app
+          cp app/Info.plist Payload/LockdownBypass.app/
+          cp app/Icon-*.png Payload/LockdownBypass.app/
+          cp LockdownBypass ldmctl Payload/LockdownBypass.app/
+          chmod 755 Payload/LockdownBypass.app/LockdownBypass Payload/LockdownBypass.app/ldmctl
+          zip -qr LockdownBypass.tipa Payload
+
+      - name: Verify LockdownBypass.tipa signature and entitlements
+        run: python3 scripts/verify-lockdown.py --tipa src/LockdownBypass.tipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LockdownBypass-TrollStore
+          path: |
+            src/LockdownBypass.tipa
+            src/LockdownBypass.tipa.verification
+
+      - name: Check package verification status before release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          STATUS_FILE="src/LockdownBypass.tipa.verification"
+          if [ ! -f "$STATUS_FILE" ] || ! grep -q "^STATUS: VERIFIED$" "$STATUS_FILE"; then
+            echo "::error::LockdownBypass package verification status is not VERIFIED!"
+            exit 1
+          fi
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src/LockdownBypass.tipa
+          generate_release_notes: true
