@@ -1,0 +1,39 @@
+# iOS WebKit 水坑与在野漏洞利用链 IOC 拦截规则集（Loon / Surge / Shadowrocket 兼容）
+# 适用场景：iOS 15–17（如 iOS 16.4.1 巨魔环境）防御已知 WebKit RCE 水坑投放与植入体外联
+# 零误伤原则：仅收录 Google Threat Intelligence (GTIG)、iVerify、Kaspersky 等披露的确切在野利用域名、C2 IP 与载荷特征
+
+# --- Coruna / CryptoWaters (iOS 13.0 - 17.2.1 Full-Chain WebKit Exploit Kit) ---
+DOMAIN-SUFFIX,tjbjdod.cn,REJECT
+DOMAIN-SUFFIX,uacounter.com,REJECT
+DOMAIN-SUFFIX,aidm8it5hf1jmtj.xyz,REJECT
+DOMAIN-SUFFIX,uawwydy3qas6ykv.xyz,REJECT
+URL-REGEX,^http:\/\/[^\/]+\/details\/(?:show\.html|new\.js|helion\.js|sms\.js|wap\.js|[a-t][0-9]{1,2}lib\.js)(?:$|[?#]),REJECT
+URL-REGEX,^https?:\/\/[^\/]+\/(?:[a-zA-Z0-9_\/.-]+\/)?(?:890fff603542c4b4de6508dcee41f73d8875a40f|13f59ce4cf6b32bd5b4341b470975b71ab67fc20|f1074228cc21dcbd4250b1c25c033a7426431982|6b5c6921b048f05b449fe3f4b71f49cf6dd3634f|1c7c51c159e4b34c748be9aad183e68f5185aeb0|bb33ae77f4c7e8858cdb9c91985c46d58b28c0e0|73b26374b1c8df29c163775c2cd1f735ff6acd56\.min|0371be6951227616286c593e3c588ecff7d58f90\.min)\.js(?:$|[?#]),REJECT
+URL-REGEX,^http:\/\/(?:[a-z0-9-]+\.)?[a-z0-9]{15}\.xyz\/,REJECT
+USER-AGENT,PowerManagement%20configd%20plugin*,REJECT
+
+# --- DarkSword (iOS WebKit JavaScriptCore + Kernel Exploit Kit) ---
+DOMAIN-SUFFIX,cdncounter.net,REJECT
+DOMAIN-SUFFIX,snapshare.chat,REJECT
+DOMAIN-SUFFIX,chainmate.top,REJECT
+IP-CIDR,62.72.21.10/32,REJECT,no-resolve
+IP-CIDR,72.60.98.48/32,REJECT,no-resolve
+
+# --- Operation Triangulation (iOS 15 - 16 Exploit Infrastructure) ---
+DOMAIN-SUFFIX,addatamarket.net,REJECT
+DOMAIN-SUFFIX,ans7tv.net,REJECT
+DOMAIN-SUFFIX,anstv.net,REJECT
+DOMAIN-SUFFIX,backuprabbit.com,REJECT
+DOMAIN-SUFFIX,businessvideonews.com,REJECT
+DOMAIN-SUFFIX,cloudsponcer.com,REJECT
+DOMAIN-SUFFIX,datamarketplace.net,REJECT
+DOMAIN-SUFFIX,growthtransport.com,REJECT
+DOMAIN-SUFFIX,mobilegamerstats.com,REJECT
+DOMAIN-SUFFIX,snoweeanalytics.com,REJECT
+DOMAIN-SUFFIX,tagclick-cdn.com,REJECT
+DOMAIN-SUFFIX,topographyupdates.com,REJECT
+DOMAIN-SUFFIX,unlimitedteacup.com,REJECT
+DOMAIN-SUFFIX,virtuallaughing.com,REJECT
+DOMAIN-SUFFIX,web-trackers.com,REJECT
+DOMAIN-SUFFIX,senlin83.com,REJECT
+DOMAIN-SUFFIX,snlin83.com,REJECT

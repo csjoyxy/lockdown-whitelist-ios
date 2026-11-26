@@ -6,8 +6,8 @@
  *   --probe
  *   --scan-containers
  *   --set-app <containerPath> <bundleId> <ignore:0|1> <deep:0|1>
- *   --safari-list [prefKeyHint]
- *   --safari-set <domain> <prefKey> <offValInt> <exclude:0|1>
+ *   --safari-list [prefKeyHint] [dbPathHint]
+ *   --safari-set <domain> <prefKey> <offValInt> <exclude:0|1> [dbPathHint]
  *   --kill-safari
  *   --kill-exec <execNameOrBundleSubpath>
  *   --ioc-scan
@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -86,6 +87,23 @@ static BOOL is_safe_app_container_path(NSString *p) {
            [p hasPrefix:@"/private/var/mobile/Containers/Data/Application/"];
 }
 
+static BOOL is_safe_mobile_db_path(NSString *p) {
+    if (p.length == 0 || [p containsString:@".."] || ![p hasSuffix:@".db"]) return NO;
+    return [p hasPrefix:@"/var/mobile/"] || [p hasPrefix:@"/private/var/mobile/"];
+}
+
+static NSString *utc_timestamp_string(void) {
+    time_t now = time(NULL);
+    struct tm gmt;
+    memset(&gmt, 0, sizeof(gmt));
+    gmtime_r(&now, &gmt);
+    char buf[32];
+    if (strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &gmt) == 0) {
+        return @"";
+    }
+    return [NSString stringWithUTF8String:buf] ?: @"";
+}
+
 static NSDictionary<NSString *, NSString *> *scan_container_root(NSString *rootDir, NSMutableArray *outItems, NSString *kind) {
     NSMutableDictionary<NSString *, NSString *> *idToPath = [NSMutableDictionary dictionary];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -100,7 +118,8 @@ static NSDictionary<NSString *, NSString *> *scan_container_root(NSString *rootD
 
         idToPath[ident] = containerPath;
         if (outItems) {
-            NSString *ignoreFile = [containerPath stringByAppendingPathComponent:@"Library/Preferences/com.apple.WebKit.cpmconfig_ignore"];
+            // WebKit _WKSystemPreferences checks <containerPath>/System/Preferences/com.apple.WebKit.cpmconfig_ignore
+            NSString *ignoreFile = [containerPath stringByAppendingPathComponent:@"System/Preferences/com.apple.WebKit.cpmconfig_ignore"];
             BOOL cpmIgnored = [fm fileExistsAtPath:ignoreFile];
             NSString *prefPath = [containerPath stringByAppendingPathComponent:
                                   [NSString stringWithFormat:@"Library/Preferences/%@.plist", ident]];
@@ -121,28 +140,25 @@ static NSDictionary<NSString *, NSString *> *scan_container_root(NSString *rootD
     return idToPath;
 }
 
-static NSArray<NSString *> *discover_safari_db_paths(BOOL createFallbackIfEmpty) {
+static NSArray<NSString *> *discover_safari_db_paths(BOOL createFallbackIfEmpty, NSString *dbPathHint) {
     NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // 1. MobileSafari App Data Container: Library/Safari/PerSitePreferences.db
-    NSDictionary<NSString *, NSString *> *appMap = scan_container_root(@"/var/mobile/Containers/Data/Application", nil, @"app");
-    NSString *safariAppContainer = appMap[@"com.apple.mobilesafari"];
-    if (safariAppContainer.length > 0) {
-        NSString *p = [safariAppContainer stringByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"];
-        if ([fm fileExistsAtPath:p]) [paths addObject:p];
+    // 0. Runtime WBSPerSitePreferencesSQLiteStore.defaultDatabaseURL hint (if provided)
+    if (is_safe_mobile_db_path(dbPathHint) && [fm fileExistsAtPath:dbPathHint]) {
+        [paths addObject:dbPathHint];
     }
 
-    // 2. Shared /var/mobile/Library/Safari/PerSitePreferences.db
-    NSString *sharedMobileSafariDB = @"/var/mobile/Library/Safari/PerSitePreferences.db";
-    if ([fm fileExistsAtPath:sharedMobileSafariDB]) {
-        [paths addObject:sharedMobileSafariDB];
-    }
-
-    // 3. AppGroup Containers matching safari
+    // 1. AppGroup / SystemGroup Containers matching safari (e.g. group.com.apple.safari used by defaultDatabaseURL)
     NSDictionary<NSString *, NSString *> *groupMap = scan_container_root(@"/var/mobile/Containers/Shared/AppGroup", nil, @"group");
+    NSString *primarySafariGroup = groupMap[@"group.com.apple.safari"];
+    if (primarySafariGroup.length > 0) {
+        NSString *gp = [primarySafariGroup stringByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"];
+        if ([fm fileExistsAtPath:gp]) [paths addObject:gp];
+    }
     for (NSString *gid in groupMap) {
         if ([gid rangeOfString:@"safari" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            if (primarySafariGroup.length == 0) primarySafariGroup = groupMap[gid];
             NSString *gp = [groupMap[gid] stringByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"];
             if ([fm fileExistsAtPath:gp]) {
                 [paths addObject:gp];
@@ -150,16 +166,69 @@ static NSArray<NSString *> *discover_safari_db_paths(BOOL createFallbackIfEmpty)
         }
     }
 
+    NSDictionary<NSString *, NSString *> *sysGroupMap = scan_container_root(@"/var/mobile/Containers/Shared/SystemGroup", nil, @"sysgroup");
+    for (NSString *gid in sysGroupMap) {
+        if ([gid rangeOfString:@"safari" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            NSString *gp = [sysGroupMap[gid] stringByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"];
+            if ([fm fileExistsAtPath:gp]) {
+                [paths addObject:gp];
+            }
+        }
+    }
+
+    // 2. MobileSafari App Data Container: Library/Safari/PerSitePreferences.db
+    NSDictionary<NSString *, NSString *> *appMap = scan_container_root(@"/var/mobile/Containers/Data/Application", nil, @"app");
+    NSString *safariAppContainer = appMap[@"com.apple.mobilesafari"];
+    if (safariAppContainer.length > 0) {
+        NSString *p = [safariAppContainer stringByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"];
+        if ([fm fileExistsAtPath:p]) [paths addObject:p];
+    }
+
+    // 3. Shared /var/mobile/Library/Safari/PerSitePreferences.db
+    NSString *sharedMobileSafariDB = @"/var/mobile/Library/Safari/PerSitePreferences.db";
+    if ([fm fileExistsAtPath:sharedMobileSafariDB]) {
+        [paths addObject:sharedMobileSafariDB];
+    }
+
     if (paths.count == 0 && createFallbackIfEmpty) {
-        if (safariAppContainer.length > 0) {
-            NSString *dir = [safariAppContainer stringByAppendingPathComponent:@"Library/Safari"];
+        if (is_safe_mobile_db_path(dbPathHint)) {
+            NSString *safariDir = [dbPathHint stringByDeletingLastPathComponent];
+            ensure_mobile_dir([safariDir stringByDeletingLastPathComponent]);
+            ensure_mobile_dir(safariDir);
+            [paths addObject:dbPathHint];
+        }
+        if (primarySafariGroup.length > 0) {
+            ensure_mobile_dir([primarySafariGroup stringByAppendingPathComponent:@"Library"]);
+            NSString *dir = [primarySafariGroup stringByAppendingPathComponent:@"Library/Safari"];
             ensure_mobile_dir(dir);
             [paths addObject:[dir stringByAppendingPathComponent:@"PerSitePreferences.db"]];
         }
-        ensure_mobile_dir(@"/var/mobile/Library/Safari");
-        [paths addObject:sharedMobileSafariDB];
+        if (paths.count == 0) {
+            if (safariAppContainer.length > 0) {
+                ensure_mobile_dir([safariAppContainer stringByAppendingPathComponent:@"Library"]);
+                NSString *dir = [safariAppContainer stringByAppendingPathComponent:@"Library/Safari"];
+                ensure_mobile_dir(dir);
+                [paths addObject:[dir stringByAppendingPathComponent:@"PerSitePreferences.db"]];
+            }
+            ensure_mobile_dir(@"/var/mobile/Library/Safari");
+            [paths addObject:sharedMobileSafariDB];
+        }
     }
     return paths.array;
+}
+
+static BOOL sqlite_table_exists(sqlite3 *db, const char *tableName) {
+    const char *sql = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;";
+    sqlite3_stmt *stmt = NULL;
+    BOOL exists = NO;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, tableName, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            exists = YES;
+        }
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    return exists;
 }
 
 static BOOL table_has_column(sqlite3 *db, const char *tableName, const char *colName) {
@@ -188,8 +257,8 @@ static BOOL is_lockdown_pref_name(NSString *prefName, NSString *hint) {
     return NO;
 }
 
-static int cmd_safari_list(NSString *prefHint) {
-    NSArray<NSString *> *dbPaths = discover_safari_db_paths(NO);
+static int cmd_safari_list(NSString *prefHint, NSString *dbPathHint) {
+    NSArray<NSString *> *dbPaths = discover_safari_db_paths(NO, dbPathHint);
     NSMutableOrderedSet<NSString *> *detectedKeys = [NSMutableOrderedSet orderedSet];
     NSMutableOrderedSet<NSString *> *allKeys = [NSMutableOrderedSet orderedSet];
     NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
@@ -222,24 +291,25 @@ static int cmd_safari_list(NSString *prefHint) {
 
         BOOL hasTs = table_has_column(db, "preference_values", "timestamp");
         const char *rowSql = hasTs
-            ? "SELECT domain, preference, preference_value, COALESCE(timestamp, 0) FROM preference_values ORDER BY domain ASC;"
-            : "SELECT domain, preference, preference_value, 0 FROM preference_values ORDER BY domain ASC;";
+            ? "SELECT domain, preference, preference_value, COALESCE(CAST(timestamp AS TEXT), '') FROM preference_values ORDER BY domain ASC;"
+            : "SELECT domain, preference, preference_value, '' FROM preference_values ORDER BY domain ASC;";
         sqlite3_stmt *rstmt = NULL;
         if (sqlite3_prepare_v2(db, rowSql, -1, &rstmt, NULL) == SQLITE_OK) {
             while (sqlite3_step(rstmt) == SQLITE_ROW) {
                 const unsigned char *dom = sqlite3_column_text(rstmt, 0);
                 const unsigned char *prf = sqlite3_column_text(rstmt, 1);
                 int val = sqlite3_column_int(rstmt, 2);
-                double ts = sqlite3_column_double(rstmt, 3);
+                const unsigned char *tsTxt = sqlite3_column_text(rstmt, 3);
                 if (!dom || !prf) continue;
                 NSString *domStr = [NSString stringWithUTF8String:(const char *)dom] ?: @"";
                 NSString *prfStr = [NSString stringWithUTF8String:(const char *)prf] ?: @"";
+                NSString *tsStr = tsTxt ? ([NSString stringWithUTF8String:(const char *)tsTxt] ?: @"") : @"";
                 if (domStr.length > 0 && is_lockdown_pref_name(prfStr, prefHint)) {
                     [entries addObject:@{
                         @"domain": domStr,
                         @"preference": prfStr,
                         @"value": @(val),
-                        @"timestamp": @(ts),
+                        @"timestamp": tsStr,
                         @"dbPath": dbPath
                     }];
                 }
@@ -259,19 +329,25 @@ static int cmd_safari_list(NSString *prefHint) {
     return 0;
 }
 
-static int cmd_safari_set(NSString *domain, NSString *prefKey, int offVal, BOOL exclude) {
+static int cmd_safari_set(NSString *domain, NSString *prefKey, int offVal, BOOL exclude, NSString *dbPathHint) {
     NSString *cleanDomain = [[domain stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
     if (cleanDomain.length == 0 || prefKey.length == 0) {
         print_json(@{@"ok": @NO, @"error": @"invalid_domain_or_key"});
         return 1;
     }
 
-    NSArray<NSString *> *dbPaths = discover_safari_db_paths(YES);
+    NSArray<NSString *> *dbPaths = discover_safari_db_paths(YES, dbPathHint);
     NSMutableArray<NSString *> *updatedPaths = [NSMutableArray array];
     NSMutableArray<NSString *> *errors = [NSMutableArray array];
+    NSString *tsNow = utc_timestamp_string();
 
     for (NSString *dbPath in dbPaths) {
-        ensure_mobile_dir([dbPath stringByDeletingLastPathComponent]);
+        NSString *safariDir = [dbPath stringByDeletingLastPathComponent];
+        if ([[safariDir lastPathComponent] isEqualToString:@"Safari"]) {
+            ensure_mobile_dir([safariDir stringByDeletingLastPathComponent]);
+        }
+        ensure_mobile_dir(safariDir);
+
         sqlite3 *db = NULL;
         int rc = sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
         if (rc != SQLITE_OK || !db) {
@@ -281,42 +357,63 @@ static int cmd_safari_set(NSString *domain, NSString *prefKey, int offVal, BOOL 
         }
         sqlite3_busy_timeout(db, 2500);
 
-        const char *initSql =
-            "CREATE TABLE IF NOT EXISTS default_preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, preference TEXT UNIQUE, default_value NUMERIC);"
-            "CREATE TABLE IF NOT EXISTS preference_values (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT, preference TEXT, preference_value NUMERIC, timestamp REAL, UNIQUE(domain, preference));";
-        (void)sqlite3_exec(db, initSql, NULL, NULL, NULL);
-
-        // Delete existing Lockdown/CaptivePortal rows for this domain (case-insensitive)
-        const char *delSql =
-            "DELETE FROM preference_values WHERE LOWER(domain) = LOWER(?) AND "
-            "(preference = ? OR preference LIKE '%Lockdown%' OR preference LIKE '%CaptivePortal%');";
-        sqlite3_stmt *dstmt = NULL;
-        if (sqlite3_prepare_v2(db, delSql, -1, &dstmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(dstmt, 1, cleanDomain.UTF8String, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(dstmt, 2, prefKey.UTF8String, -1, SQLITE_TRANSIENT);
-            (void)sqlite3_step(dstmt);
+        // Initialize exact WBSPerSitePreferencesSQLiteStore schema (version 5 on iOS 16) ONLY if brand new
+        if (!sqlite_table_exists(db, "preference_values")) {
+            const char *initSql =
+                "CREATE TABLE IF NOT EXISTS default_preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, preference TEXT NOT NULL UNIQUE, default_value NUMERIC, sync_data BLOB NULL);"
+                "CREATE TABLE IF NOT EXISTS preference_values (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL, preference TEXT NOT NULL, preference_value NUMERIC, timestamp TEXT NULL, sync_data BLOB NULL, record_name TEXT NULL, UNIQUE(domain, preference));"
+                "CREATE TABLE IF NOT EXISTS deleted_cloudkit_records (record_name TEXT NOT NULL UNIQUE, sync_data BLOB);"
+                "PRAGMA user_version = 5;";
+            (void)sqlite3_exec(db, initSql, NULL, NULL, NULL);
         }
-        if (dstmt) sqlite3_finalize(dstmt);
 
         BOOL stepOk = YES;
-        if (exclude) {
+        if (!exclude) {
+            const char *delSql =
+                "DELETE FROM preference_values WHERE LOWER(domain) = LOWER(?) AND "
+                "(preference = ? OR preference LIKE '%Lockdown%' OR preference LIKE '%CaptivePortal%');";
+            sqlite3_stmt *dstmt = NULL;
+            if (sqlite3_prepare_v2(db, delSql, -1, &dstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(dstmt, 1, cleanDomain.UTF8String, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(dstmt, 2, prefKey.UTF8String, -1, SQLITE_TRANSIENT);
+                (void)sqlite3_step(dstmt);
+            }
+            if (dstmt) sqlite3_finalize(dstmt);
+        } else {
+            // Remove case-mismatched duplicates for the same domain while preserving sync_data on exact match
+            const char *cleanDupSql =
+                "DELETE FROM preference_values WHERE LOWER(domain) = LOWER(?) AND domain != ? AND "
+                "(preference = ? OR preference LIKE '%Lockdown%' OR preference LIKE '%CaptivePortal%');";
+            sqlite3_stmt *cstmt = NULL;
+            if (sqlite3_prepare_v2(db, cleanDupSql, -1, &cstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(cstmt, 1, cleanDomain.UTF8String, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(cstmt, 2, cleanDomain.UTF8String, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(cstmt, 3, prefKey.UTF8String, -1, SQLITE_TRANSIENT);
+                (void)sqlite3_step(cstmt);
+            }
+            if (cstmt) sqlite3_finalize(cstmt);
+
             BOOL hasTs = table_has_column(db, "preference_values", "timestamp");
-            const char *insSql = hasTs
-                ? "INSERT OR REPLACE INTO preference_values (domain, preference, preference_value, timestamp) VALUES (?, ?, ?, ?);"
-                : "INSERT OR REPLACE INTO preference_values (domain, preference, preference_value) VALUES (?, ?, ?);";
+            const char *upsertSql = hasTs
+                ? "INSERT INTO preference_values (domain, preference, preference_value, timestamp) VALUES (?, ?, ?, ?) "
+                  "ON CONFLICT(domain, preference) DO UPDATE SET domain = excluded.domain, preference = excluded.preference, "
+                  "preference_value = excluded.preference_value, timestamp = excluded.timestamp;"
+                : "INSERT INTO preference_values (domain, preference, preference_value) VALUES (?, ?, ?) "
+                  "ON CONFLICT(domain, preference) DO UPDATE SET domain = excluded.domain, preference = excluded.preference, "
+                  "preference_value = excluded.preference_value;";
             sqlite3_stmt *istmt = NULL;
-            if (sqlite3_prepare_v2(db, insSql, -1, &istmt, NULL) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(db, upsertSql, -1, &istmt, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(istmt, 1, cleanDomain.UTF8String, -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(istmt, 2, prefKey.UTF8String, -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int(istmt, 3, offVal);
                 if (hasTs) {
-                    sqlite3_bind_double(istmt, 4, CFAbsoluteTimeGetCurrent());
+                    sqlite3_bind_text(istmt, 4, tsNow.UTF8String, -1, SQLITE_TRANSIENT);
                 }
                 int sRc = sqlite3_step(istmt);
                 if (sRc != SQLITE_DONE) {
                     stepOk = NO;
                     const char *emsg = sqlite3_errmsg(db);
-                    [errors addObject:[NSString stringWithFormat:@"insert_failed:%@:%s", dbPath, emsg ?: "err"]];
+                    [errors addObject:[NSString stringWithFormat:@"upsert_failed:%@:%s", dbPath, emsg ?: "err"]];
                 }
             } else {
                 stepOk = NO;
@@ -355,42 +452,62 @@ static int cmd_set_app(NSString *containerPath, NSString *bundleId, BOOL ignore,
     }
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *prefsDir = [containerPath stringByAppendingPathComponent:@"Library/Preferences"];
-    ensure_mobile_dir([containerPath stringByAppendingPathComponent:@"Library"]);
-    ensure_mobile_dir(prefsDir);
 
-    NSString *ignoreFile = [prefsDir stringByAppendingPathComponent:@"com.apple.WebKit.cpmconfig_ignore"];
+    // WebKit _WKSystemPreferences checks <containerPath>/System/Preferences/com.apple.WebKit.cpmconfig_ignore
+    NSString *sysDir = [containerPath stringByAppendingPathComponent:@"System"];
+    NSString *sysPrefsDir = [sysDir stringByAppendingPathComponent:@"Preferences"];
+    ensure_mobile_dir(sysDir);
+    ensure_mobile_dir(sysPrefsDir);
+
+    NSString *libPrefsDir = [containerPath stringByAppendingPathComponent:@"Library/Preferences"];
+    ensure_mobile_dir([containerPath stringByAppendingPathComponent:@"Library"]);
+    ensure_mobile_dir(libPrefsDir);
+
+    NSString *sysIgnoreFile = [sysPrefsDir stringByAppendingPathComponent:@"com.apple.WebKit.cpmconfig_ignore"];
+    NSString *legacyIgnoreFile = [libPrefsDir stringByAppendingPathComponent:@"com.apple.WebKit.cpmconfig_ignore"];
+
     NSError *err = nil;
     if (ignore) {
-        NSData *marker = [@"1\n" dataUsingEncoding:NSUTF8StringEncoding];
-        if (![marker writeToFile:ignoreFile options:NSDataWritingAtomic error:&err]) {
+        NSData *marker = [NSData data];
+        if (![marker writeToFile:sysIgnoreFile options:NSDataWritingAtomic error:&err]) {
             print_json(@{@"ok": @NO, @"error": err.localizedDescription ?: @"write_cpmconfig_failed"});
             return 1;
         }
-        chmod(ignoreFile.fileSystemRepresentation, 0644);
-        fix_mobile_owner(ignoreFile);
+        chmod(sysIgnoreFile.fileSystemRepresentation, 0644);
+        fix_mobile_owner(sysIgnoreFile);
     } else {
-        if ([fm fileExistsAtPath:ignoreFile]) {
-            [fm removeItemAtPath:ignoreFile error:nil];
+        if ([fm fileExistsAtPath:sysIgnoreFile]) {
+            [fm removeItemAtPath:sysIgnoreFile error:nil];
+        }
+        if ([fm fileExistsAtPath:legacyIgnoreFile]) {
+            [fm removeItemAtPath:legacyIgnoreFile error:nil];
         }
     }
 
-    NSString *appPlistPath = [prefsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleId]];
+    // Sync container plist: mark WebKitCaptivePortalModeAlertShown=YES so iOS Settings -> Lockdown Mode also lists the app,
+    // plus optional deep LDMGlobalEnabled=NO override.
+    NSString *appPlistPath = [libPrefsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleId]];
     NSMutableDictionary *dict = [[NSDictionary dictionaryWithContentsOfFile:appPlistPath] mutableCopy];
-    if (ignore && deep) {
+    BOOL plistChanged = NO;
+    if (ignore) {
         if (!dict) dict = [NSMutableDictionary dictionary];
-        dict[@"LDMGlobalEnabled"] = @NO;
-        NSData *bplist = [NSPropertyListSerialization dataWithPropertyList:dict
-                                                                    format:NSPropertyListBinaryFormat_v1_0
-                                                                   options:0
-                                                                     error:nil];
-        if (bplist) {
-            [bplist writeToFile:appPlistPath options:NSDataWritingAtomic error:nil];
-            chmod(appPlistPath.fileSystemRepresentation, 0600);
-            fix_mobile_owner(appPlistPath);
+        if (![dict[@"WebKitCaptivePortalModeAlertShown"] boolValue]) {
+            dict[@"WebKitCaptivePortalModeAlertShown"] = @YES;
+            plistChanged = YES;
+        }
+        if (deep) {
+            dict[@"LDMGlobalEnabled"] = @NO;
+            plistChanged = YES;
+        } else if (dict[@"LDMGlobalEnabled"] != nil) {
+            [dict removeObjectForKey:@"LDMGlobalEnabled"];
+            plistChanged = YES;
         }
     } else if (dict && dict[@"LDMGlobalEnabled"] != nil) {
         [dict removeObjectForKey:@"LDMGlobalEnabled"];
+        plistChanged = YES;
+    }
+
+    if (plistChanged && dict) {
         NSData *bplist = [NSPropertyListSerialization dataWithPropertyList:dict
                                                                     format:NSPropertyListBinaryFormat_v1_0
                                                                    options:0
@@ -402,8 +519,8 @@ static int cmd_set_app(NSString *containerPath, NSString *bundleId, BOOL ignore,
         }
     }
 
+    notify_post("WKCaptivePortalModeContainerConfigurationChanged");
     notify_post("com.apple.WebKit.cpmconfig");
-    notify_post("WKCaptivePortalModeContainerConfigurationChangedNotification");
 
     print_json(@{
         @"ok": @YES,
@@ -445,9 +562,13 @@ static int kill_matching_processes(BOOL safariSuite, NSString *targetSubpath) {
                 match = YES;
             }
         } else if (targetSubpath.length > 0) {
-            if (([p hasPrefix:@"/var/containers/Bundle/Application/"] ||
-                 [p hasPrefix:@"/private/var/containers/Bundle/Application/"] ||
-                 [p hasPrefix:@"/Applications/"]) &&
+            BOOL isAppPath = [p hasPrefix:@"/var/containers/Bundle/Application/"] ||
+                             [p hasPrefix:@"/private/var/containers/Bundle/Application/"] ||
+                             [p hasPrefix:@"/Applications/"] ||
+                             [p hasPrefix:@"/System/Applications/"] ||
+                             [p hasPrefix:@"/System/Cryptexes/"] ||
+                             ([p hasPrefix:@"/private/preboot/"] && [p containsString:@"/Applications/"]);
+            if (isAppPath &&
                 [p containsString:targetSubpath] &&
                 ![p containsString:@"LockdownBypass.app"]) {
                 match = YES;
@@ -567,18 +688,20 @@ int main(int argc, const char *argv[]) {
         }
         if ([cmd isEqualToString:@"--safari-list"]) {
             NSString *hint = (argc >= 3) ? [NSString stringWithUTF8String:argv[2]] : @"";
-            return cmd_safari_list(hint);
+            NSString *dbHint = (argc >= 4) ? [NSString stringWithUTF8String:argv[3]] : @"";
+            return cmd_safari_list(hint, dbHint);
         }
         if ([cmd isEqualToString:@"--safari-set"]) {
             if (argc < 6) {
-                print_json(@{@"ok": @NO, @"error": @"usage: --safari-set <domain> <prefKey> <offVal> <0|1>"});
+                print_json(@{@"ok": @NO, @"error": @"usage: --safari-set <domain> <prefKey> <offVal> <0|1> [dbPathHint]"});
                 return 2;
             }
             NSString *dom = [NSString stringWithUTF8String:argv[2]];
             NSString *key = [NSString stringWithUTF8String:argv[3]];
             int offVal = atoi(argv[4]);
             BOOL excl = atoi(argv[5]) != 0;
-            return cmd_safari_set(dom, key, offVal, excl);
+            NSString *dbHint = (argc >= 7) ? [NSString stringWithUTF8String:argv[6]] : @"";
+            return cmd_safari_set(dom, key, offVal, excl, dbHint);
         }
         if ([cmd isEqualToString:@"--kill-safari"]) {
             int k = kill_matching_processes(YES, nil);

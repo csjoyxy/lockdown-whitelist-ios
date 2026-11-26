@@ -192,6 +192,12 @@ final class AppViewModel: ObservableObject {
             if !root.isEmpty {
                 appendUnique(root)
             }
+            if host.hasPrefix("www.") {
+                let noWww = String(host.dropFirst(4))
+                if noWww.contains(".") {
+                    appendUnique(noWww)
+                }
+            }
             appendUnique(host)
 
             if expandSubdomains && !root.isEmpty {

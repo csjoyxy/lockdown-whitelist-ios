@@ -76,6 +76,9 @@ jobs:
           chmod 755 Payload/LockdownBypass.app/LockdownBypass Payload/LockdownBypass.app/ldmctl
           zip -qr LockdownBypass.tipa Payload
 
+      - name: Verify Loon WebKit Shield plugins and IOC rules
+        run: node tests/test_webkit_shield.js
+
       - name: Verify LockdownBypass.tipa signature and entitlements
         run: python3 scripts/verify-lockdown.py --tipa src/LockdownBypass.tipa
 

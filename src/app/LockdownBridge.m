@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
@@ -169,6 +170,7 @@ static void LBEnsurePrivateFrameworksLoaded(void) {
     dispatch_once(&onceToken, ^{
         dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_NOW);
         dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW);
+        dlopen("/System/Library/PrivateFrameworks/LockdownMode.framework/LockdownMode", RTLD_NOW);
         dlopen("/System/Library/PrivateFrameworks/SafariCore.framework/SafariCore", RTLD_NOW);
         dlopen("/System/Library/PrivateFrameworks/SafariShared.framework/SafariShared", RTLD_NOW);
         dlopen("/System/Library/PrivateFrameworks/SafariSharedUI.framework/SafariSharedUI", RTLD_NOW);
@@ -328,6 +330,30 @@ static NSNumber * _Nullable LBQueryWKIsIgnoredForContainer(NSString *containerPa
 
 // MARK: - SafariShared WBSLockdownModePreferenceManager Introspection
 
+static NSString *LBDiscoverSafariDefaultDBPath(void) {
+    LBEnsurePrivateFrameworksLoaded();
+    Class storeCls = NSClassFromString(@"WBSPerSitePreferencesSQLiteStore");
+    if (storeCls) {
+        id dbURL = LBSafeInvoke0(storeCls, @"defaultDatabaseURL");
+        if ([dbURL isKindOfClass:[NSURL class]]) {
+            NSString *p = [(NSURL *)dbURL path];
+            if (p.length > 0) return p;
+        }
+    }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    id groupURL = LBSafeInvoke0(fm, @"safari_mobileSafariGroupContainerDirectoryURL");
+    if ([groupURL isKindOfClass:[NSURL class]]) {
+        NSString *p = [[(NSURL *)groupURL URLByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"] path];
+        if (p.length > 0) return p;
+    }
+    NSURL *stdGroupURL = [fm containerURLForSecurityApplicationGroupIdentifier:@"group.com.apple.safari"];
+    if (stdGroupURL) {
+        NSString *p = [[stdGroupURL URLByAppendingPathComponent:@"Library/Safari/PerSitePreferences.db"] path];
+        if (p.length > 0) return p;
+    }
+    return @"";
+}
+
 static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable * _Nullable outMgr,
                                                                     id _Nullable * _Nullable outPref) {
     LBEnsurePrivateFrameworksLoaded();
@@ -335,6 +361,7 @@ static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable
     int offVal = 0;
     int onVal = 1;
     NSString *mgrClassName = @"";
+    NSString *defaultDBPath = LBDiscoverSafariDefaultDBPath();
 
     Class storeCls = NSClassFromString(@"WBSPerSitePreferencesSQLiteStore");
     Class mgrCls = NSClassFromString(@"WBSLockdownModePreferenceManager");
@@ -376,9 +403,13 @@ static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable
             store = LBSafeInvoke0(storeCls, @"sharedStore") ?: LBSafeInvoke0(storeCls, @"defaultStore");
         }
         @try {
-            SEL initStoreSel = NSSelectorFromString(@"initWithPerSitePreferencesStore:");
-            if (store && [mgrCls instancesRespondToSelector:initStoreSel]) {
-                mgr = ((id (*)(id, SEL, id))objc_msgSend)([mgrCls alloc], initStoreSel, store);
+            // Real iOS 16+ selector is initWithPerSitePreferenceStore: (singular); keep plural as fallback
+            SEL initSingularSel = NSSelectorFromString(@"initWithPerSitePreferenceStore:");
+            SEL initPluralSel = NSSelectorFromString(@"initWithPerSitePreferencesStore:");
+            if (store && [mgrCls instancesRespondToSelector:initSingularSel]) {
+                mgr = ((id (*)(id, SEL, id))objc_msgSend)([mgrCls alloc], initSingularSel, store);
+            } else if (store && [mgrCls instancesRespondToSelector:initPluralSel]) {
+                mgr = ((id (*)(id, SEL, id))objc_msgSend)([mgrCls alloc], initPluralSel, store);
             } else {
                 mgr = [[mgrCls alloc] init];
             }
@@ -387,7 +418,8 @@ static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable
         }
 
         if (mgr) {
-            pref = LBSafeInvoke0(mgr, @"lockdownModePreference")
+            pref = LBSafeInvoke0(mgr, @"lockdownPreference")
+                ?: LBSafeInvoke0(mgr, @"lockdownModePreference")
                 ?: LBSafeInvoke0(mgr, @"captivePortalPreference");
             if (!pref) {
                 id prefsArr = LBSafeInvoke0(mgr, @"preferences");
@@ -415,7 +447,10 @@ static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable
 
     // Cross-check with existing SQLite keys if any exist on disk
     int ec = -1;
-    NSDictionary *dbInfo = LBParseJSONDict(LBBridgeRunCtl(@[@"--safari-list", resolvedKey], &ec));
+    NSArray<NSString *> *listArgs = defaultDBPath.length > 0
+        ? @[@"--safari-list", resolvedKey, defaultDBPath]
+        : @[@"--safari-list", resolvedKey];
+    NSDictionary *dbInfo = LBParseJSONDict(LBBridgeRunCtl(listArgs, &ec));
     NSArray *dbKeys = dbInfo[@"detectedLockdownKeys"];
     if ([mgrClassName length] == 0 && [dbKeys isKindOfClass:[NSArray class]] && dbKeys.count > 0) {
         NSString *firstDbKey = dbKeys.firstObject;
@@ -430,7 +465,8 @@ static NSDictionary<NSString *, id> *LBDiscoverSafariPreferenceSpec(id _Nullable
         @"managerClass": mgrClassName,
         @"preferenceKey": resolvedKey,
         @"offVal": @(offVal),
-        @"onVal": @(onVal)
+        @"onVal": @(onVal),
+        @"defaultDBPath": defaultDBPath ?: @""
     };
 }
 
@@ -463,8 +499,37 @@ NSString *LBBridgeHighLevelDomain(NSString *host) {
 NSDictionary<NSString *, id> *LBBridgeSystemStatus(void) {
     LBEnsurePrivateFrameworksLoaded();
     BOOL ldmDefaults = [[NSUserDefaults standardUserDefaults] boolForKey:@"LDMGlobalEnabled"];
+    CFPropertyListRef cfVal = CFPreferencesCopyValue(
+        CFSTR("LDMGlobalEnabled"),
+        kCFPreferencesAnyApplication,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
+    if (cfVal) {
+        if (CFGetTypeID(cfVal) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)cfVal)) {
+            ldmDefaults = YES;
+        }
+        CFRelease(cfVal);
+    }
 
-    BOOL wkGlobal = ldmDefaults;
+    BOOL ldmFrameworkEnabled = NO;
+    Class ldmMgrCls = NSClassFromString(@"LockdownModeManager");
+    if (ldmMgrCls) {
+        id sharedMgr = LBSafeInvoke0(ldmMgrCls, @"shared");
+        id enObj = sharedMgr ? LBSafeInvoke0(sharedMgr, @"enabled") : nil;
+        if ([enObj isKindOfClass:[NSNumber class]]) {
+            ldmFrameworkEnabled = [(NSNumber *)enObj boolValue];
+        }
+    }
+
+    BOOL sysctlEnabled = NO;
+    uint64_t ldmState = 0;
+    size_t sysCtlLen = sizeof(ldmState);
+    if (sysctlbyname("security.mac.lockdown_mode_state", &ldmState, &sysCtlLen, NULL, 0) == 0) {
+        sysctlEnabled = (ldmState == 1);
+    }
+
+    BOOL wkGlobal = ldmDefaults || ldmFrameworkEnabled || sysctlEnabled;
     Class wkSys = NSClassFromString(@"_WKSystemPreferences");
     if (wkSys) {
         id r1 = LBSafeInvoke0(wkSys, @"isCaptivePortalModeEnabled")
@@ -479,8 +544,8 @@ NSDictionary<NSString *, id> *LBBridgeSystemStatus(void) {
     NSDictionary *safariSpec = LBDiscoverSafariPreferenceSpec(NULL, NULL);
 
     return @{
-        @"lockdownEnabled": @(ldmDefaults || wkGlobal),
-        @"ldmGlobalDefaults": @(ldmDefaults),
+        @"lockdownEnabled": @(ldmDefaults || ldmFrameworkEnabled || sysctlEnabled || wkGlobal),
+        @"ldmGlobalDefaults": @(ldmDefaults || ldmFrameworkEnabled || sysctlEnabled),
         @"wkCaptivePortalGlobal": @(wkGlobal),
         @"ctlProbe": probe ?: @"",
         @"ctlExitCode": @(ec),
@@ -498,10 +563,14 @@ NSDictionary<NSString *, id> *LBBridgeSafariListExcludedSites(void) {
     id pref = nil;
     NSDictionary *spec = LBDiscoverSafariPreferenceSpec(&mgr, &pref);
     NSString *prefKey = spec[@"preferenceKey"] ?: @"PerSitePreferencesLockdownMode";
+    NSString *defaultDBPath = spec[@"defaultDBPath"] ?: @"";
     int offVal = [spec[@"offVal"] intValue];
 
     int ec = -1;
-    NSDictionary *ctlDict = LBParseJSONDict(LBBridgeRunCtl(@[@"--safari-list", prefKey], &ec));
+    NSArray<NSString *> *listArgs = defaultDBPath.length > 0
+        ? @[@"--safari-list", prefKey, defaultDBPath]
+        : @[@"--safari-list", prefKey];
+    NSDictionary *ctlDict = LBParseJSONDict(LBBridgeRunCtl(listArgs, &ec));
     NSArray *rawEntries = [ctlDict[@"entries"] isKindOfClass:[NSArray class]] ? ctlDict[@"entries"] : @[];
     NSArray *dbPaths = [ctlDict[@"dbPaths"] isKindOfClass:[NSArray class]] ? ctlDict[@"dbPaths"] : @[];
 
@@ -516,7 +585,7 @@ NSDictionary<NSString *, id> *LBBridgeSafariListExcludedSites(void) {
                 @"domain": dom,
                 @"preference": row[@"preference"] ?: prefKey,
                 @"value": @(val),
-                @"timestamp": row[@"timestamp"] ?: @0,
+                @"timestamp": row[@"timestamp"] ?: @"",
                 @"dbPath": row[@"dbPath"] ?: @""
             };
         }
@@ -547,6 +616,7 @@ NSString *LBBridgeSafariSetDomainExcluded(NSString *domain, BOOL excluded) {
     id pref = nil;
     NSDictionary *spec = LBDiscoverSafariPreferenceSpec(&mgr, &pref);
     NSString *prefKey = spec[@"preferenceKey"] ?: @"PerSitePreferencesLockdownMode";
+    NSString *defaultDBPath = spec[@"defaultDBPath"] ?: @"";
     int offVal = [spec[@"offVal"] intValue];
     int onVal = [spec[@"onVal"] intValue];
 
@@ -602,13 +672,16 @@ NSString *LBBridgeSafariSetDomainExcluded(NSString *domain, BOOL excluded) {
 
     // Tier 2: Guaranteed SQLite persistence across all Safari PerSitePreferences.db files via root helper
     int ec = -1;
-    NSArray<NSString *> *ctlArgs = @[
+    NSMutableArray<NSString *> *ctlArgs = [NSMutableArray arrayWithArray:@[
         @"--safari-set",
         clean,
         prefKey,
         [NSString stringWithFormat:@"%d", offVal],
         excluded ? @"1" : @"0"
-    ];
+    ]];
+    if (defaultDBPath.length > 0) {
+        [ctlArgs addObject:defaultDBPath];
+    }
     NSDictionary *res = LBParseJSONDict(LBBridgeRunCtl(ctlArgs, &ec));
     BOOL ok = [res[@"ok"] boolValue];
     if (!ok) {
@@ -767,6 +840,32 @@ NSData *LBBridgeAppIconPNG(NSString *bundleId) {
     return nil;
 }
 
+static void LBSyncAppContainerUserDefaults(NSString *bundleId,
+                                           NSString *containerPath,
+                                           BOOL excluded,
+                                           BOOL deepOverride) {
+    @try {
+        SEL initSuiteSel = NSSelectorFromString(@"_initWithSuiteName:container:");
+        if (![NSUserDefaults instancesRespondToSelector:initSuiteSel]) return;
+        NSURL *containerURL = [NSURL fileURLWithPath:containerPath isDirectory:YES];
+        if (!containerURL) return;
+        NSUserDefaults *suite = ((NSUserDefaults *(*)(id, SEL, NSString *, NSURL *))objc_msgSend)(
+            [NSUserDefaults alloc], initSuiteSel, bundleId, containerURL);
+        if (!suite) return;
+        if (excluded) {
+            [suite setBool:YES forKey:@"WebKitCaptivePortalModeAlertShown"];
+            if (deepOverride) {
+                [suite setBool:NO forKey:@"LDMGlobalEnabled"];
+            } else {
+                [suite removeObjectForKey:@"LDMGlobalEnabled"];
+            }
+        } else {
+            [suite removeObjectForKey:@"LDMGlobalEnabled"];
+        }
+        [suite synchronize];
+    } @catch (__unused NSException *ex) {}
+}
+
 NSString *LBBridgeSetAppExcluded(NSString *bundleId,
                                  NSString *containerPath,
                                  BOOL excluded,
@@ -775,10 +874,11 @@ NSString *LBBridgeSetAppExcluded(NSString *bundleId,
         return @"缺少应用容器路径";
     }
 
-    // Tier 1: Call native WebKit _WKSystemPreferences
+    // Tier 1: Call native WebKit _WKSystemPreferences + sync container cfprefsd suite
     (void)LBInvokeWKSetIgnoredForContainer(containerPath, excluded);
+    LBSyncAppContainerUserDefaults(bundleId, containerPath, excluded, deepOverride);
 
-    // Tier 2: Persist cpmconfig_ignore + optional deep LDMGlobalEnabled=NO via root helper (ensuring mobile 501:501 ownership)
+    // Tier 2: Persist System/Preferences/com.apple.WebKit.cpmconfig_ignore + optional deep LDMGlobalEnabled=NO via root helper
     int ec = -1;
     NSArray<NSString *> *args = @[
         @"--set-app",

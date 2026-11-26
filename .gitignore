@@ -8,3 +8,5 @@ src/ldmctl
 src/*.tipa
 src/*.ipa
 src/*.verification
+__pycache__/
+*.pyc
