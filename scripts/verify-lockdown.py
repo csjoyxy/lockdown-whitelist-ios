@@ -57,6 +57,9 @@ def verify_entitlements(ldid_bin: str, bin_path: str, expected_plist_path: str) 
         missing = required_iokit - iokit
         if missing:
             raise RuntimeError(f"{bin_path}: missing required IOKit entitlements: {sorted(missing)}")
+    if expected.get("application-identifier") == "com.lili.lockdownwhitelist.ctl":
+        if not actual.get("com.apple.private.amfi.developer-mode-control"):
+            raise RuntimeError(f"{bin_path}: missing com.apple.private.amfi.developer-mode-control entitlement")
 
 
 def extract_lb_version(app_src_dir: str) -> str:

@@ -56,6 +56,7 @@ jobs:
             -import-objc-header app/LockdownBridge.h \
             LockdownBridge.o \
             app/Models.swift \
+            app/URLSafetyInspector.swift \
             app/AppViewModel.swift \
             app/Views.swift \
             app/AppMain.swift \

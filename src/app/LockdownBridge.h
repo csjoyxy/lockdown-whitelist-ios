@@ -8,7 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-#define LB_VERSION "0.1.0"
+#define LB_VERSION "0.2.0"
 #ifndef LB_COMMIT
 #define LB_COMMIT "dev"
 #endif
@@ -35,5 +35,12 @@ FOUNDATION_EXPORT NSString *LBBridgeSetAppExcluded(NSString *bundleId,
 FOUNDATION_EXPORT NSInteger LBBridgeRestartApp(NSString *appBundleFolderName);
 
 FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeRunIOCScan(void);
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeRunSecurityAudit(void);
+
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeDeveloperModeStatus(void);
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeDeveloperModeRevealMenu(void);
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeDeveloperModeArm(void);
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LBBridgeDeveloperModeDisable(void);
+FOUNDATION_EXPORT void LBBridgeRebootDevice(void);
 
 NS_ASSUME_NONNULL_END

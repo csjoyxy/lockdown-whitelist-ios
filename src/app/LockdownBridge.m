@@ -906,3 +906,33 @@ NSDictionary<NSString *, id> *LBBridgeRunIOCScan(void) {
     int ec = -1;
     return LBParseJSONDict(LBBridgeRunCtl(@[@"--ioc-scan"], &ec));
 }
+
+NSDictionary<NSString *, id> *LBBridgeRunSecurityAudit(void) {
+    int ec = -1;
+    return LBParseJSONDict(LBBridgeRunCtl(@[@"--security-audit"], &ec));
+}
+
+NSDictionary<NSString *, id> *LBBridgeDeveloperModeStatus(void) {
+    int ec = -1;
+    return LBParseJSONDict(LBBridgeRunCtl(@[@"--devmode-status"], &ec));
+}
+
+NSDictionary<NSString *, id> *LBBridgeDeveloperModeRevealMenu(void) {
+    int ec = -1;
+    return LBParseJSONDict(LBBridgeRunCtl(@[@"--devmode-reveal"], &ec));
+}
+
+NSDictionary<NSString *, id> *LBBridgeDeveloperModeArm(void) {
+    int ec = -1;
+    return LBParseJSONDict(LBBridgeRunCtl(@[@"--devmode-arm"], &ec));
+}
+
+NSDictionary<NSString *, id> *LBBridgeDeveloperModeDisable(void) {
+    int ec = -1;
+    return LBParseJSONDict(LBBridgeRunCtl(@[@"--devmode-disable"], &ec));
+}
+
+void LBBridgeRebootDevice(void) {
+    int ec = -1;
+    (void)LBBridgeRunCtl(@[@"--reboot"], &ec);
+}
