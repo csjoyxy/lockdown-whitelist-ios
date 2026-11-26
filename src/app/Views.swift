@@ -6,26 +6,36 @@ struct RootContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView {
+            TabView(selection: $vm.selectedTab) {
                 SafariSitesTabView(vm: vm)
                     .tabItem {
                         Label("网站白名单", systemImage: "safari.fill")
                     }
+                    .tag(MainTab.sites)
 
                 AppsWhitelistTabView(vm: vm)
                     .tabItem {
                         Label("应用白名单", systemImage: "square.grid.2x2.fill")
                     }
+                    .tag(MainTab.apps)
+
+                URLSafetyTabView(vm: vm)
+                    .tabItem {
+                        Label("网址预检", systemImage: "globe")
+                    }
+                    .tag(MainTab.urlCheck)
 
                 IOCScannerTabView(vm: vm)
                     .tabItem {
                         Label("安全体检", systemImage: "checkmark.shield.fill")
                     }
+                    .tag(MainTab.audit)
 
                 DiagnosticsTabView(vm: vm)
                     .tabItem {
-                        Label("诊断说明", systemImage: "wrench.and.screwdriver.fill")
+                        Label("系统工具", systemImage: "hammer.fill")
                     }
+                    .tag(MainTab.tools)
             }
 
             if let msg = vm.toastMessage {
@@ -76,27 +86,47 @@ struct SafariSitesTabView: View {
 
                 Section(
                     header: Text("主动添加免锁定网站（无需先在 Safari 打开）"),
-                    footer: Text("解决 iOS 16 开启锁定模式后「网站打不开 → 无法点地址栏菜单关锁定模式」的死循环。添加后点右上角「重启 Safari」即可立即满血访问。")
+                    footer: Text("不确定某个网站是否安全时，可点「先安全预检」在不调用 WebKit 的隔离沙盒中检测挂马/钓鱼风险；确认安全后再加白名单并点右上角「重启Safari生效」。")
                 ) {
                     VStack(alignment: .leading, spacing: 10) {
+                        TextField("输入域名或粘贴完整网址 (如 taobao.com)", text: $vm.domainInput)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.roundedBorder)
+
                         HStack(spacing: 8) {
-                            TextField("输入域名或粘贴完整网址 (如 taobao.com)", text: $vm.domainInput)
-                                .keyboardType(.URL)
-                                .textInputAutocapitalization(.never)
-                                .disableAutocorrection(true)
-                                .textFieldStyle(.roundedBorder)
+                            Button {
+                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                vm.precheckDomainInputInSandbox()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "magnifyingglass")
+                                    Text("先安全预检")
+                                }
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.secondary.opacity(0.14))
+                                .foregroundColor(.primary)
+                                .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
 
                             Button {
                                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                 vm.addDomainsFromInput()
                             } label: {
-                                Text("加白名单")
-                                    .font(.system(size: 13.5, weight: .semibold))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(Color.accentColor)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(8)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("加白名单")
+                                }
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.accentColor)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
                             }
                             .buttonStyle(.plain)
                         }
@@ -332,26 +362,239 @@ private struct AppRowView: View {
     }
 }
 
-// MARK: - Tab 3: Offline Exploit-Kit IOC Scanner
+// MARK: - Tab 3: Zero-WebKit URL Safety Pre-Flight Sandbox
+
+struct URLSafetyTabView: View {
+    @ObservedObject var vm: AppViewModel
+
+    private func colorForRisk(_ level: URLRiskLevel) -> Color {
+        switch level {
+        case .safe: return .green
+        case .notice: return .blue
+        case .warning: return .orange
+        case .danger: return .red
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(
+                    header: Text("零渲染安全沙盒检测（不调用 WebKit · 100% 免触发漏洞）"),
+                    footer: Text("为什么不用内置浏览器直接打开？在 iOS 16.4.1 上，一旦用 WebKit 渲染恶意网页就可能直接触发漏洞。本检测通过隔离网络流拉取前 256KB 文本、追踪跳转链、并发核验 Cloudflare(1.1.1.2) 与 Quad9(9.9.9.9) 全球恶意库，并静态审计隐藏挂马 iframe、JIT 利用原语与盗币钓鱼特征。")
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            TextField("输入或粘贴待测网址 (如 https://example.com)", text: $vm.urlProbeInput)
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .disableAutocorrection(true)
+                                .textFieldStyle(.roundedBorder)
+
+                            Button {
+                                if let str = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !str.isEmpty {
+                                    vm.urlProbeInput = str
+                                } else {
+                                    vm.showToast("剪贴板为空")
+                                }
+                            } label: {
+                                Text("粘贴")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(Color.secondary.opacity(0.14))
+                                    .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button {
+                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            vm.runURLSafetyProbe()
+                        } label: {
+                            HStack {
+                                Spacer()
+                                if vm.isProbingURL {
+                                    ProgressView()
+                                        .padding(.trailing, 6)
+                                    Text("正在隔离拉取与多源核验...")
+                                } else {
+                                    Image(systemName: "checkmark.shield.fill")
+                                    Text("开始安全检测")
+                                }
+                                Spacer()
+                            }
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .padding(.vertical, 9)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(9)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isProbingURL)
+
+                        HStack(spacing: 8) {
+                            Text("一键体验：")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                            Button {
+                                vm.runURLSafetyProbe(customInput: "https://www.apple.com/cn/")
+                            } label: {
+                                Text("测正常官网")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.green.opacity(0.14))
+                                    .foregroundColor(.green)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                vm.runURLSafetyProbe(customInput: "http://aidm8it5hf1jmtj.xyz/details/show.html")
+                            } label: {
+                                Text("测水坑样本(无害模拟)")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.red.opacity(0.14))
+                                    .foregroundColor(.red)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                if let report = vm.urlReport {
+                    Section(header: Text("检测结论 · \(report.candidateDomain)")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(report.summaryTitle)
+                                .font(.system(size: 15.5, weight: .bold))
+                                .foregroundColor(colorForRisk(report.riskLevel))
+
+                            Text(report.summaryAdvice)
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("• 协议与状态：\(report.isHTTPS ? "HTTPS 加密" : "HTTP 明文") · HTTP \(report.httpStatusCode > 0 ? "\(report.httpStatusCode)" : "未响应") · 读取 \(report.fetchedBytes / 1024) KB")
+                                Text("• Cloudflare 1.1.1.2 情报：\(dohStatusLabel(report.cloudflareClean))")
+                                Text("• Quad9 9.9.9.9 情报：\(dohStatusLabel(report.quad9Clean))")
+                                Text("• 跳转次数：\(max(0, report.redirectChain.count - 1)) 次 · 外部脚本域：\(report.externalScriptDomains.count) 个")
+                            }
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                            if report.riskLevel == .safe || report.riskLevel == .notice {
+                                Button {
+                                    vm.whitelistProbedReport(report)
+                                } label: {
+                                    HStack {
+                                        Spacer()
+                                        Image(systemName: "plus.circle.fill")
+                                        Text("将该域名加入 Safari 白名单 (\(report.candidateDomain))")
+                                        Spacer()
+                                    }
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .padding(.vertical, 8)
+                                    .background(Color.green.opacity(0.16))
+                                    .foregroundColor(.green)
+                                    .cornerRadius(8)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.top, 4)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    if !report.findings.isEmpty {
+                        Section(header: Text("风险与特征明细 (\(report.findings.count))")) {
+                            ForEach(report.findings) { f in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(f.category)
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(colorForRisk(f.severity).opacity(0.16))
+                                            .foregroundColor(colorForRisk(f.severity))
+                                            .cornerRadius(4)
+                                        Text(f.title)
+                                            .font(.system(size: 13.5, weight: .semibold))
+                                    }
+                                    Text(f.detail)
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+
+                    if report.redirectChain.count > 1 {
+                        Section(header: Text("跳转链路追踪 (\(report.redirectChain.count) 跳)")) {
+                            ForEach(Array(report.redirectChain.enumerated()), id: \.offset) { idx, hop in
+                                Text("\(idx + 1). \(hop)")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    if !report.externalScriptDomains.isEmpty {
+                        Section(header: Text("页面引用的第三方脚本/框架域名 (\(report.externalScriptDomains.count))")) {
+                            Text(report.externalScriptDomains.joined(separator: "  ·  "))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("网址预检")
+        }
+        .navigationViewStyle(.stack)
+    }
+
+    private func dohStatusLabel(_ clean: Bool?) -> String {
+        guard let c = clean else { return "网络超时或未解析" }
+        return c ? "✅ 未见恶意标记" : "🚨 命中恶意/钓鱼黑名单！"
+    }
+}
+
+// MARK: - Tab 4: Offline Exploit-Kit IOC + WQGuard-Inspired Sideload & Container Audit
 
 struct IOCScannerTabView: View {
     @ObservedObject var vm: AppViewModel
+
+    private var overallHealthy: Bool {
+        vm.iocClean && vm.auditSummary.highCount == 0
+    }
 
     var body: some View {
         NavigationView {
             List {
                 Section {
                     HStack(spacing: 14) {
-                        Image(systemName: vm.iocClean ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                        Image(systemName: overallHealthy ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
                             .font(.system(size: 32))
-                            .foregroundColor(vm.iocClean ? .green : .red)
+                            .foregroundColor(overallHealthy ? .green : .red)
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(vm.iocClean ? "本机未发现已知水坑植入痕迹" : "检测到可疑落地文件痕迹！")
-                                .font(.system(size: 16, weight: .bold))
+                            Text(overallHealthy ? "本机未发现水坑植入或高危木马应用" : "检出高危风险项，请立即核查！")
+                                .font(.system(size: 15.5, weight: .bold))
+                            Text("已审计 \(vm.auditSummary.scannedApps) 个应用（含 \(vm.auditSummary.nonAppStoreApps) 个巨魔/侧载包）· 物理只读零修改")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
                             if let dt = vm.iocLastChecked {
-                                Text("上次检测：\(dt.formatted(date: .omitted, time: .standard)) · 离线零联网扫描")
-                                    .font(.system(size: 12))
+                                Text("上次扫描：\(dt.formatted(date: .omitted, time: .standard))")
+                                    .font(.system(size: 11.5))
                                     .foregroundColor(.secondary)
                             }
                         }
@@ -363,8 +606,8 @@ struct IOCScannerTabView: View {
                     } label: {
                         HStack {
                             Spacer()
-                            Label("立即重新扫描本机 IOC 痕迹", systemImage: "magnifyingglass.circle.fill")
-                                .font(.system(size: 14.5, weight: .semibold))
+                            Label("立即重新扫描（水坑 IOC + 侧载/容器深度审计）", systemImage: "magnifyingglass.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
                             Spacer()
                         }
                         .padding(.vertical, 4)
@@ -372,8 +615,52 @@ struct IOCScannerTabView: View {
                 }
 
                 Section(
-                    header: Text("Coruna / PLASMAGRID (iOS 13–17.2.1) 核心落盘指标"),
-                    footer: Text("数据来源：Google Threat Intelligence (GTIG) 与 iVerify 披露的在野 iOS WebKit 水坑攻击链特征库。即使部分内存型载荷重启会清除，上述持久化/锁文件也可辅助排查历史感染。")
+                    header: Text("巨魔/侧载应用与容器只读审计（借鉴 WQGuard · 适配 iOS 16）"),
+                    footer: Text("采用 O_RDONLY | O_NOFOLLOW 物理只读扫描：无需连接电脑或开启环回 VPN，直接检测非 App Store 渠道的二次打包仿冒钱包、TCC 免弹窗隐私越权、注入动态库、后台剪贴板监听、跨容器越界软链与异常受监管状态。")
+                ) {
+                    if vm.auditSummary.findings.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("全部已安装应用、共享容器软链与监管配置均未发现异常特征")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        ForEach(vm.auditSummary.findings) { item in
+                            let isHigh = item.severity == "high"
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Text(isHigh ? "高危" : "留意")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background((isHigh ? Color.red : Color.orange).opacity(0.16))
+                                        .foregroundColor(isHigh ? .red : .orange)
+                                        .cornerRadius(4)
+                                    Text(item.category)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                Text(item.title)
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text(item.target)
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                Text(item.detail)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section(
+                    header: Text("Coruna / PLASMAGRID (iOS 13–17.2.1) 水坑落盘指标"),
+                    footer: Text("数据来源：Google Threat Intelligence (GTIG) 与 iVerify 披露的在野 iOS WebKit 水坑攻击链特征库。")
                 ) {
                     ForEach(vm.iocItems) { item in
                         HStack(alignment: .top, spacing: 10) {
@@ -401,20 +688,110 @@ struct IOCScannerTabView: View {
     }
 }
 
-// MARK: - Tab 4: Diagnostics & Guide
+// MARK: - Tab 5: System Tools (One-Tap Developer Mode & Diagnostics)
 
 struct DiagnosticsTabView: View {
     @ObservedObject var vm: AppViewModel
 
+    private var devModeStatusText: String {
+        if vm.devMode.enabled {
+            return "已开启"
+        } else if vm.devMode.armed {
+            return "已预开启（重启手机点确认即生效）"
+        } else {
+            return "未开启"
+        }
+    }
+
+    private var devModeColor: Color {
+        if vm.devMode.enabled { return .green }
+        if vm.devMode.armed { return .blue }
+        return .orange
+    }
+
     var body: some View {
         NavigationView {
             List {
+                Section(
+                    header: Text("开发者模式管理（摆脱电脑端爱思助手）"),
+                    footer: Text("原理说明：通过巨魔权限直连系统 AppleMobileFileIntegrity (com.apple.amfi.xpc) 与 AMFIShowOverridePath。注意：苹果 iOS 16 原生机制规定，在「全局锁定模式」开启状态下无法首次激活开发者模式；若点击开启时提示受锁定模式限制，可先临时关闭锁定模式 → 在本页一键开启开发者模式 → 再重新开启锁定模式。")
+                ) {
+                    HStack(spacing: 12) {
+                        Image(systemName: vm.devMode.enabled ? "wrench.and.screwdriver.fill" : "hammer.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundColor(devModeColor)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("当前状态：\(devModeStatusText)")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("系统设置入口：\(vm.devMode.menuVisible ? "已在「隐私与安全性」中显示" : "当前隐藏") · SEP可写：\(vm.devMode.writable ? "是" : "受锁定模式保护")")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+
+                    if !vm.devMode.enabled {
+                        Button {
+                            vm.armDeveloperModeNow()
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "bolt.shield.fill")
+                                Text(vm.devMode.armed ? "重新发送预开启指令" : "一键开启开发者模式（免电脑）")
+                                Spacer()
+                            }
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .padding(.vertical, 9)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if vm.devMode.armed && !vm.devMode.enabled {
+                        Button {
+                            vm.showManualRebootConfirm = true
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "power")
+                                Text("立即重启设备以弹出系统开启确认框")
+                                Spacer()
+                            }
+                            .font(.system(size: 14, weight: .semibold))
+                            .padding(.vertical, 8)
+                            .background(Color.blue.opacity(0.14))
+                            .foregroundColor(.blue)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        vm.revealDeveloperModeMenuOnly()
+                    } label: {
+                        Label("仅在系统「设置 → 隐私与安全性」显示入口（免重启）", systemImage: "eye.fill")
+                            .font(.system(size: 13.5, weight: .medium))
+                    }
+
+                    if vm.devMode.enabled {
+                        Button(role: .destructive) {
+                            vm.disableDeveloperModeNow()
+                        } label: {
+                            Label("关闭开发者模式（立即生效）", systemImage: "xmark.shield")
+                                .font(.system(size: 13.5, weight: .medium))
+                        }
+                    }
+                }
+
                 Section(header: Text("黄金搭配使用建议（iOS 16.4.1）")) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("1. 开启系统全局「锁定模式」（设置 → 隐私与安全性 → 锁定模式），让所有陌生链接、网页广告 iframe 默认运行在无 JIT 安全沙盒中。")
-                        Text("2. 遇到打不开或缺少图标字体的信任网站，直接在本工具「网站白名单」输入域名添加，再点右上角「重启 Safari」即可满血打开。")
-                        Text("3. 遇到内置网页卡顿或白屏的常用 App（如微信、淘宝等），在「应用白名单」打开开关即可单独豁免该应用，无需关闭全局锁定模式。")
-                        Text("4. 搭配 Loon 的「iOS WebKit 水坑与漏洞链防护」插件，在网络层提前阻断已知恶意域名与植入载荷。")
+                        Text("1. 开启系统全局「锁定模式」，让所有陌生链接与广告 iframe 默认运行在无 JIT 沙盒中。")
+                        Text("2. 遇到陌生链接不确定安全性时，先在「网址预检」标签页检测是否含水坑挂马或钓鱼特征。")
+                        Text("3. 确认安全的常用网站若打不开，在「网站白名单」添加并点右上角「重启 Safari」即可满血访问；常用 App 内置网页异常则在「应用白名单」一键豁免。")
+                        Text("4. 搭配本仓库 Loon「iOS WebKit 水坑与漏洞链防护」插件，在网络层零延迟拦截在野漏洞包。")
                     }
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
@@ -437,7 +814,32 @@ struct DiagnosticsTabView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("诊断说明")
+            .navigationTitle("系统工具")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        vm.refreshAll()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+            }
+            .alert("开发者模式已成功预开启！", isPresented: $vm.showDevModeRebootPrompt) {
+                Button("立即重启手机", role: .destructive) {
+                    vm.rebootDeviceNow()
+                }
+                Button("稍后手动重启", role: .cancel) {}
+            } message: {
+                Text("已为您同时开启系统设置菜单与开机激活标记。重启手机解锁后，系统会自动弹出「打开开发者模式？」原生确认框，点击「打开」并输入锁屏密码即可生效。")
+            }
+            .alert("确认立即重启设备？", isPresented: $vm.showManualRebootConfirm) {
+                Button("立即重启", role: .destructive) {
+                    vm.rebootDeviceNow()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("重启解锁后请在系统弹窗点击「打开」以完成开发者模式启用。")
+            }
         }
         .navigationViewStyle(.stack)
     }

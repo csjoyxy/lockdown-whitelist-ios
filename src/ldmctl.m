@@ -11,11 +11,20 @@
  *   --kill-safari
  *   --kill-exec <execNameOrBundleSubpath>
  *   --ioc-scan
+ *   --security-audit
+ *   --devmode-status
+ *   --devmode-reveal
+ *   --devmode-arm
+ *   --devmode-disable
+ *   --reboot
  */
 
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
 #include <sqlite3.h>
 #include <notify.h>
+#include <dlfcn.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +34,9 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
+#include <arpa/inet.h>
+#include <mach-o/loader.h>
+#include <mach-o/fat.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -658,6 +670,665 @@ static int cmd_ioc_scan(void) {
     return 0;
 }
 
+// MARK: - iOS 16+ Developer Mode Control (AMFI XPC + AMFIShowOverridePath)
+
+typedef BOOL (*LBAMFIBoolFn)(void);
+typedef void *(*LBXPCConnCreateFn)(const char *, dispatch_queue_t _Nullable, uint64_t);
+typedef void (*LBXPCSetHandlerFn)(void *, void *);
+typedef void (*LBXPCVoidConnFn)(void *);
+typedef void *(*LBXPCSendSyncFn)(void *, void *);
+typedef void *(*LBXPCDictGetValFn)(void *, const char *);
+typedef void *(*LBCFXPCCreateMsgFn)(CFTypeRef);
+typedef CFTypeRef (*LBCFXPCCreateObjFn)(void *);
+typedef void (^LBXPCEventBlock)(void * _Nullable);
+
+static void *amfi_framework_handle(void) {
+    static void *handle = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        handle = dlopen("/System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework/AppleMobileFileIntegrity", RTLD_NOW);
+    });
+    return handle;
+}
+
+static NSString *resolve_amfi_override_path(void) {
+    void *h = amfi_framework_handle();
+    if (h) {
+        CFTypeRef *pSym = (CFTypeRef *)dlsym(h, "AMFIShowOverridePath");
+        if (pSym && *pSym && CFGetTypeID(*pSym) == CFStringGetTypeID()) {
+            NSString *s = (__bridge NSString *)(*pSym);
+            if (s.length > 0) return s;
+        }
+    }
+    return @"";
+}
+
+static NSDictionary * _Nullable amfi_send_xpc_action(int action, BOOL * _Nullable xpcAvailableOut) {
+    LBXPCConnCreateFn fnCreate = (LBXPCConnCreateFn)dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service");
+    LBXPCSetHandlerFn fnSetHandler = (LBXPCSetHandlerFn)dlsym(RTLD_DEFAULT, "xpc_connection_set_event_handler");
+    LBXPCVoidConnFn fnResume = (LBXPCVoidConnFn)dlsym(RTLD_DEFAULT, "xpc_connection_resume");
+    LBXPCVoidConnFn fnCancel = (LBXPCVoidConnFn)dlsym(RTLD_DEFAULT, "xpc_connection_cancel");
+    LBXPCSendSyncFn fnSendSync = (LBXPCSendSyncFn)dlsym(RTLD_DEFAULT, "xpc_connection_send_message_with_reply_sync");
+    LBXPCDictGetValFn fnDictGet = (LBXPCDictGetValFn)dlsym(RTLD_DEFAULT, "xpc_dictionary_get_value");
+    LBCFXPCCreateMsgFn fnCreateMsg = (LBCFXPCCreateMsgFn)dlsym(RTLD_DEFAULT, "_CFXPCCreateXPCMessageWithCFObject");
+    LBCFXPCCreateObjFn fnCreateObj = (LBCFXPCCreateObjFn)dlsym(RTLD_DEFAULT, "_CFXPCCreateCFObjectFromXPCMessage");
+
+    if (!fnCreate || !fnSetHandler || !fnResume || !fnSendSync || !fnDictGet || !fnCreateMsg || !fnCreateObj) {
+        if (xpcAvailableOut) *xpcAvailableOut = NO;
+        return nil;
+    }
+    if (xpcAvailableOut) *xpcAvailableOut = YES;
+
+    void *conn = fnCreate("com.apple.amfi.xpc", NULL, 0);
+    if (!conn) return nil;
+
+    LBXPCEventBlock emptyBlock = ^(__unused void *ev) {};
+    fnSetHandler(conn, (__bridge void *)emptyBlock);
+    fnResume(conn);
+
+    NSDictionary *req = @{@"action": @(action)};
+    void *msg = fnCreateMsg((__bridge CFDictionaryRef)req);
+    NSDictionary *resultDict = nil;
+    if (msg) {
+        void *reply = fnSendSync(conn, msg);
+        if (reply) {
+            void *cfReply = fnDictGet(reply, "cfreply");
+            if (cfReply) {
+                CFTypeRef cfObj = fnCreateObj(cfReply);
+                if (cfObj) {
+                    id bridged = CFBridgingRelease(cfObj);
+                    if ([bridged isKindOfClass:[NSDictionary class]]) {
+                        resultDict = (NSDictionary *)bridged;
+                    }
+                }
+            }
+        }
+    }
+    if (fnCancel) fnCancel(conn);
+    return resultDict;
+}
+
+static BOOL reveal_developer_mode_menu(NSString * _Nullable * _Nullable errOut) {
+    NSString *overridePath = resolve_amfi_override_path();
+    if (overridePath.length == 0 ||
+        ([overridePath rangeOfString:@".."].location != NSNotFound) ||
+        !( [overridePath hasPrefix:@"/var/"] || [overridePath hasPrefix:@"/private/var/"] )) {
+        if (errOut) *errOut = @"未解析到有效的 AMFIShowOverridePath";
+        return NO;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *parentDir = [overridePath stringByDeletingLastPathComponent];
+    if (parentDir.length > 0 && ![fm fileExistsAtPath:parentDir]) {
+        [fm createDirectoryAtPath:parentDir
+      withIntermediateDirectories:YES
+                       attributes:@{NSFilePosixPermissions: @(0755)}
+                            error:nil];
+    }
+
+    uint64_t val = 1;
+    NSData *payload = [NSData dataWithBytes:&val length:sizeof(val)];
+    NSError *wErr = nil;
+    BOOL ok = [payload writeToFile:overridePath options:NSDataWritingAtomic error:&wErr];
+    if (!ok) {
+        ok = [fm createFileAtPath:overridePath
+                         contents:payload
+                       attributes:@{NSFilePosixPermissions: @(0444)}];
+    }
+    if (ok) {
+        chmod(overridePath.fileSystemRepresentation, 0444);
+        notify_post("security.mac.amfi.developer_mode_status.changed");
+    } else if (errOut) {
+        *errOut = wErr.localizedDescription ?: @"写入 AMFIShowOverridePath 失败";
+    }
+    return ok;
+}
+
+static NSDictionary *query_developer_mode_state_dict(void) {
+    void *h = amfi_framework_handle();
+    BOOL enabled = NO;
+    BOOL menuVisible = NO;
+
+    if (h) {
+        LBAMFIBoolFn fnIsEnabled = (LBAMFIBoolFn)dlsym(h, "AMFIIsDeveloperModeEnabled");
+        LBAMFIBoolFn fnStatus = (LBAMFIBoolFn)dlsym(h, "amfi_developer_mode_status");
+        LBAMFIBoolFn fnShowMenu = (LBAMFIBoolFn)dlsym(h, "AMFIShouldShowDeveloperModeSettings");
+        if (fnIsEnabled && fnIsEnabled()) enabled = YES;
+        if (fnStatus && fnStatus()) enabled = YES;
+        if (fnShowMenu && fnShowMenu()) menuVisible = YES;
+    }
+
+    NSString *overridePath = resolve_amfi_override_path();
+    if (overridePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:overridePath]) {
+        menuVisible = YES;
+    }
+
+    BOOL xpcAvail = NO;
+    NSDictionary *reply = amfi_send_xpc_action(2, &xpcAvail); // kAMFIActionStatus = 2
+    BOOL armed = NO;
+    BOOL writable = YES;
+    BOOL xpcSuccess = NO;
+
+    if (reply && [reply[@"success"] isKindOfClass:[NSNumber class]] && [reply[@"success"] boolValue]) {
+        xpcSuccess = YES;
+        if ([reply[@"status"] isKindOfClass:[NSNumber class]]) {
+            enabled = enabled || [reply[@"status"] boolValue];
+        }
+        if ([reply[@"armed"] isKindOfClass:[NSNumber class]]) {
+            armed = [reply[@"armed"] boolValue];
+        }
+        if ([reply[@"writable"] isKindOfClass:[NSNumber class]]) {
+            writable = [reply[@"writable"] boolValue];
+        }
+    }
+    if (enabled || armed) {
+        menuVisible = YES;
+    }
+
+    return @{
+        @"ok": @YES,
+        @"enabled": @(enabled),
+        @"armed": @(armed),
+        @"writable": @(writable),
+        @"menuVisible": @(menuVisible),
+        @"xpcAvailable": @(xpcAvail && xpcSuccess),
+        @"overridePath": overridePath ?: @""
+    };
+}
+
+static int cmd_devmode_status(void) {
+    print_json(query_developer_mode_state_dict());
+    return 0;
+}
+
+static int cmd_devmode_reveal(void) {
+    NSString *err = nil;
+    BOOL revealed = reveal_developer_mode_menu(&err);
+    NSMutableDictionary *st = [query_developer_mode_state_dict() mutableCopy];
+    st[@"ok"] = @(revealed);
+    if (!revealed && err.length > 0) {
+        st[@"error"] = err;
+    }
+    print_json(st);
+    return revealed ? 0 : 1;
+}
+
+static int cmd_devmode_arm(void) {
+    NSString *revErr = nil;
+    BOOL revealed = reveal_developer_mode_menu(&revErr);
+
+    NSDictionary *before = query_developer_mode_state_dict();
+    if ([before[@"enabled"] boolValue]) {
+        NSMutableDictionary *res = [before mutableCopy];
+        res[@"ok"] = @YES;
+        res[@"alreadyEnabled"] = @YES;
+        print_json(res);
+        return 0;
+    }
+
+    BOOL xpcAvail = NO;
+    NSDictionary *armReply = amfi_send_xpc_action(0, &xpcAvail); // kAMFIActionArm = 0
+    BOOL armOk = armReply && [armReply[@"success"] isKindOfClass:[NSNumber class]] && [armReply[@"success"] boolValue];
+
+    NSMutableDictionary *after = [query_developer_mode_state_dict() mutableCopy];
+    after[@"ok"] = @(armOk);
+    after[@"alreadyEnabled"] = @NO;
+    after[@"armed"] = @(armOk || [after[@"armed"] boolValue]);
+    after[@"revealedMenu"] = @(revealed);
+    if (!armOk) {
+        NSString *errMsg = [armReply[@"error"] isKindOfClass:[NSString class]] ? armReply[@"error"] : @"";
+        if (errMsg.length == 0) {
+            errMsg = ![before[@"writable"] boolValue]
+                ? @"当前系统锁定模式限制写入 SEP 开发者状态（已为您显示设置入口；如需首次激活，可先临时关闭锁定模式→开启开发者模式→再重新开启锁定模式）"
+                : @"调用 com.apple.amfi.xpc 预开启失败";
+        }
+        after[@"error"] = errMsg;
+    }
+    print_json(after);
+    return armOk ? 0 : 1;
+}
+
+static int cmd_devmode_disable(void) {
+    BOOL xpcAvail = NO;
+    NSDictionary *disReply = amfi_send_xpc_action(1, &xpcAvail); // kAMFIActionDisable = 1
+    BOOL disOk = disReply && [disReply[@"success"] isKindOfClass:[NSNumber class]] && [disReply[@"success"] boolValue];
+    NSMutableDictionary *after = [query_developer_mode_state_dict() mutableCopy];
+    after[@"ok"] = @(disOk);
+    if (!disOk) {
+        after[@"error"] = @"关闭开发者模式失败";
+    }
+    print_json(after);
+    return disOk ? 0 : 1;
+}
+
+static int cmd_reboot_device(void) {
+    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+    Class fbsCls = NSClassFromString(@"FBSSystemService");
+    SEL sharedSel = NSSelectorFromString(@"sharedService");
+    SEL rebootSel = NSSelectorFromString(@"reboot");
+    if (fbsCls && [fbsCls respondsToSelector:sharedSel]) {
+        id svc = ((id (*)(id, SEL))objc_msgSend)(fbsCls, sharedSel);
+        if (svc && [svc respondsToSelector:rebootSel]) {
+            print_json(@{@"ok": @YES, @"rebooting": @YES});
+            fflush(stdout);
+            ((void (*)(id, SEL))objc_msgSend)(svc, rebootSel);
+            sleep(1);
+            return 0;
+        }
+    }
+    print_json(@{@"ok": @NO, @"error": @"FBSSystemService_unavailable"});
+    return 1;
+}
+
+// MARK: - WQGuard-Inspired Strictly Read-Only Sideload / Mach-O / Container Audit (iOS 16.4.1)
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0x1000000
+#endif
+
+static NSData * _Nullable read_regular_file_nofollow(NSString *path, size_t maxBytes) {
+    if (path.length == 0) return nil;
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return nil;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+        close(fd);
+        return nil;
+    }
+    size_t toRead = (size_t)st.st_size;
+    if (toRead > maxBytes) toRead = maxBytes;
+    NSMutableData *buf = [NSMutableData dataWithLength:toRead];
+    if (!buf) {
+        close(fd);
+        return nil;
+    }
+    ssize_t got = read(fd, buf.mutableBytes, toRead);
+    close(fd);
+    if (got <= 0) return nil;
+    buf.length = (NSUInteger)got;
+    return buf;
+}
+
+static NSDictionary * _Nullable inspect_macho_readonly(NSString *execPath) {
+    if (execPath.length == 0) return nil;
+    int fd = open(execPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return nil;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 32) {
+        close(fd);
+        return nil;
+    }
+    uint64_t fileSize = (uint64_t)st.st_size;
+
+    uint8_t fatBuf[4096];
+    ssize_t headN = pread(fd, fatBuf, sizeof(fatBuf), 0);
+    if (headN < 32) {
+        close(fd);
+        return nil;
+    }
+
+    uint64_t sliceOffset = 0;
+    uint32_t rawMagic = *(const uint32_t *)fatBuf;
+    if (rawMagic == FAT_CIGAM || rawMagic == FAT_MAGIC) {
+        const struct fat_header *fh = (const struct fat_header *)fatBuf;
+        uint32_t nfat = (rawMagic == FAT_CIGAM) ? ntohl(fh->nfat_arch) : fh->nfat_arch;
+        if (nfat > 32) nfat = 32;
+        for (uint32_t i = 0; i < nfat; i++) {
+            size_t off = sizeof(struct fat_header) + (size_t)i * sizeof(struct fat_arch);
+            if (off + sizeof(struct fat_arch) > (size_t)headN) break;
+            const struct fat_arch *fa = (const struct fat_arch *)(fatBuf + off);
+            cpu_type_t cpu = (rawMagic == FAT_CIGAM) ? (cpu_type_t)ntohl((uint32_t)fa->cputype) : fa->cputype;
+            uint32_t archOff = (rawMagic == FAT_CIGAM) ? ntohl(fa->offset) : fa->offset;
+            if (cpu == CPU_TYPE_ARM64 && (uint64_t)archOff + 32 <= fileSize) {
+                sliceOffset = archOff;
+                break;
+            }
+        }
+    }
+
+    size_t hdrCap = 65536;
+    NSMutableData *hdrData = [NSMutableData dataWithLength:hdrCap];
+    ssize_t sliceN = pread(fd, hdrData.mutableBytes, hdrCap, (off_t)sliceOffset);
+    if (sliceN < (ssize_t)sizeof(struct mach_header_64)) {
+        close(fd);
+        return nil;
+    }
+
+    const uint8_t *base = (const uint8_t *)hdrData.bytes;
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)base;
+    if (mh->magic != MH_MAGIC_64) {
+        close(fd);
+        return nil;
+    }
+
+    uint32_t ncmds = mh->ncmds;
+    if (ncmds > 4096) ncmds = 4096;
+    size_t maxCmdEnd = sizeof(struct mach_header_64) + (size_t)mh->sizeofcmds;
+    if (maxCmdEnd > (size_t)sliceN) maxCmdEnd = (size_t)sliceN;
+
+    BOOL encrypted = NO;
+    uint32_t csOff = 0, csSize = 0;
+    uint32_t strOff = 0, strSize = 0;
+    NSMutableArray<NSString *> *dylibs = [NSMutableArray array];
+
+    size_t cur = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < ncmds && cur + sizeof(struct load_command) <= maxCmdEnd; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + cur);
+        if (lc->cmdsize < sizeof(struct load_command) || cur + lc->cmdsize > maxCmdEnd) break;
+
+        if (lc->cmd == LC_ENCRYPTION_INFO_64 && lc->cmdsize >= sizeof(struct encryption_info_command_64)) {
+            const struct encryption_info_command_64 *enc = (const struct encryption_info_command_64 *)lc;
+            if (enc->cryptid != 0) encrypted = YES;
+        } else if (lc->cmd == LC_CODE_SIGNATURE && lc->cmdsize >= sizeof(struct linkedit_data_command)) {
+            const struct linkedit_data_command *cs = (const struct linkedit_data_command *)lc;
+            csOff = cs->dataoff;
+            csSize = cs->datasize;
+        } else if (lc->cmd == LC_SYMTAB && lc->cmdsize >= sizeof(struct symtab_command)) {
+            const struct symtab_command *sym = (const struct symtab_command *)lc;
+            strOff = sym->stroff;
+            strSize = sym->strsize;
+        } else if ((lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB || lc->cmd == LC_REEXPORT_DYLIB) &&
+                   lc->cmdsize >= sizeof(struct dylib_command)) {
+            const struct dylib_command *dl = (const struct dylib_command *)lc;
+            uint32_t nameOff = dl->dylib.name.offset;
+            if (nameOff >= sizeof(struct dylib_command) && nameOff < lc->cmdsize) {
+                const char *s = (const char *)lc + nameOff;
+                size_t maxLen = lc->cmdsize - nameOff;
+                size_t actualLen = strnlen(s, maxLen);
+                NSString *ds = [[NSString alloc] initWithBytes:s length:actualLen encoding:NSUTF8StringEncoding];
+                if (ds.length > 0) [dylibs addObject:ds];
+            }
+        }
+        cur += lc->cmdsize;
+    }
+
+    NSDictionary *entitlements = @{};
+    if (csOff > 0 && csSize >= 12 && csSize <= 2 * 1024 * 1024 && sliceOffset + csOff + csSize <= fileSize) {
+        NSMutableData *csData = [NSMutableData dataWithLength:csSize];
+        if (csData && pread(fd, csData.mutableBytes, csSize, (off_t)(sliceOffset + csOff)) == (ssize_t)csSize) {
+            const uint8_t *cb = (const uint8_t *)csData.bytes;
+            uint32_t sbMagic = ntohl(*(const uint32_t *)cb);
+            uint32_t sbLen = ntohl(*(const uint32_t *)(cb + 4));
+            uint32_t sbCount = ntohl(*(const uint32_t *)(cb + 8));
+            if (sbMagic == 0xFADE0CC0 && sbLen <= csSize && sbCount <= 64) {
+                for (uint32_t j = 0; j < sbCount; j++) {
+                    size_t idxOff = 12 + (size_t)j * 8;
+                    if (idxOff + 8 > csSize) break;
+                    uint32_t slotType = ntohl(*(const uint32_t *)(cb + idxOff));
+                    uint32_t blobOff = ntohl(*(const uint32_t *)(cb + idxOff + 4));
+                    if (blobOff + 8 > csSize) continue;
+                    uint32_t subMagic = ntohl(*(const uint32_t *)(cb + blobOff));
+                    uint32_t subLen = ntohl(*(const uint32_t *)(cb + blobOff + 4));
+                    if ((slotType == 5 || subMagic == 0xFADE7171) && subLen >= 8 && blobOff + subLen <= csSize) {
+                        NSData *xmlData = [NSData dataWithBytes:(cb + blobOff + 8) length:(subLen - 8)];
+                        id parsed = [NSPropertyListSerialization propertyListWithData:xmlData
+                                                                             options:NSPropertyListImmutable
+                                                                              format:NULL
+                                                                               error:NULL];
+                        if ([parsed isKindOfClass:[NSDictionary class]]) {
+                            entitlements = (NSDictionary *)parsed;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    BOOL usesPasteboard = NO;
+    if (!encrypted && strOff > 0 && strSize > 0 && strSize <= 4 * 1024 * 1024 && sliceOffset + strOff + strSize <= fileSize) {
+        NSMutableData *symData = [NSMutableData dataWithLength:strSize];
+        if (symData && pread(fd, symData.mutableBytes, strSize, (off_t)(sliceOffset + strOff)) == (ssize_t)strSize) {
+            if (memmem(symData.bytes, strSize, "UIPasteboard", 12) != NULL ||
+                memmem(symData.bytes, strSize, "generalPasteboard", 17) != NULL) {
+                usesPasteboard = YES;
+            }
+        }
+    }
+
+    close(fd);
+    return @{
+        @"encrypted": @(encrypted),
+        @"dylibs": dylibs,
+        @"entitlements": entitlements,
+        @"usesPasteboard": @(usesPasteboard)
+    };
+}
+
+static BOOL matches_impersonated_wallet_brand(NSString *name, NSString *bundleId) {
+    NSString *lowerName = [name lowercaseString] ?: @"";
+    NSString *lowerBid = [bundleId lowercaseString] ?: @"";
+    NSArray<NSString *> *walletBrands = @[
+        @"metamask", @"trust wallet", @"trustwallet", @"imtoken", @"tokenpocket",
+        @"phantom wallet", @"onekey", @"ledger live", @"bitget wallet", @"okx wallet"
+    ];
+    for (NSString *b in walletBrands) {
+        if ([lowerName containsString:b] || [lowerBid containsString:[b stringByReplacingOccurrencesOfString:@" " withString:@""]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static int cmd_security_audit(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSDictionary *> *findings = [NSMutableArray array];
+    NSInteger scannedApps = 0;
+    NSInteger nonAppStoreCount = 0;
+    NSInteger highCount = 0;
+    NSInteger mediumCount = 0;
+
+    // 1. Check Fake Supervision / Rogue MDM CloudConfigurationDetails.plist (WQGuard FAKE_SUPERVISION_MDM)
+    NSString *cloudCfgPath = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.configurationprofiles/Library/ConfigurationProfiles/CloudConfigurationDetails.plist";
+    NSData *cloudData = read_regular_file_nofollow(cloudCfgPath, 256 * 1024);
+    if (cloudData) {
+        id cloudPlist = [NSPropertyListSerialization propertyListWithData:cloudData options:0 format:NULL error:NULL];
+        if ([cloudPlist isKindOfClass:[NSDictionary class]] && [cloudPlist[@"IsSupervised"] boolValue]) {
+            NSString *org = [cloudPlist[@"OrganizationName"] isKindOfClass:[NSString class]] ? cloudPlist[@"OrganizationName"] : @"未注明机构";
+            highCount++;
+            [findings addObject:@{
+                @"id": @"FAKE_SUPERVISION_MDM",
+                @"severity": @"high",
+                @"category": @"系统监管篡改",
+                @"title": @"设备当前处于「受监管模式 (Supervised)」",
+                @"target": org,
+                @"detail": @"若非您本人配置的企业/学校监管或延迟 OTA，恶意描述文件或越权工具可能借此下发全局证书或锁机策略。"
+            }];
+        }
+    }
+
+    // 2. Check Shared AppGroup Caches for Escaping Symlinks (WQGuard ESCAPING_SYMLINK, lstat non-following)
+    NSString *appGroupRoot = @"/var/mobile/Containers/Shared/AppGroup";
+    NSArray<NSString *> *groupUUIDs = [fm contentsOfDirectoryAtPath:appGroupRoot error:nil];
+    for (NSString *guuid in groupUUIDs) {
+        NSString *gContainer = [appGroupRoot stringByAppendingPathComponent:guuid];
+        NSString *cachesDir = [gContainer stringByAppendingPathComponent:@"Library/Caches"];
+        NSArray<NSString *> *cacheEntries = [fm contentsOfDirectoryAtPath:cachesDir error:nil];
+        for (NSString *entry in cacheEntries) {
+            NSString *entryPath = [cachesDir stringByAppendingPathComponent:entry];
+            struct stat lst;
+            if (lstat(entryPath.fileSystemRepresentation, &lst) == 0 && S_ISLNK(lst.st_mode)) {
+                char linkBuf[PATH_MAX];
+                ssize_t len = readlink(entryPath.fileSystemRepresentation, linkBuf, sizeof(linkBuf) - 1);
+                if (len > 0) {
+                    linkBuf[len] = '\0';
+                    NSString *target = [NSString stringWithUTF8String:linkBuf] ?: @"";
+                    if ([target hasPrefix:@"/"] &&
+                        ![target hasPrefix:gContainer] &&
+                        ![target hasPrefix:[@"/private" stringByAppendingString:gContainer]]) {
+                        highCount++;
+                        [findings addObject:@{
+                            @"id": [NSString stringWithFormat:@"SYMLINK_%@_%@", guuid, entry],
+                            @"severity": @"high",
+                            @"category": @"跨沙盒逃逸软链",
+                            @"title": @"共享容器缓存发现越界符号链接",
+                            @"target": [NSString stringWithFormat:@"%@ -> %@", entryPath, target],
+                            @"detail": @"共享容器 Library/Caches 内存在指向容器外部的符号链接，常见于沙盒逃逸残留。"
+                        }];
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Static Mach-O + CSBlob Entitlement + Dylib Audit on Installed Apps
+    NSString *bundleRoot = @"/var/containers/Bundle/Application";
+    NSArray<NSString *> *bundleUUIDs = [fm contentsOfDirectoryAtPath:bundleRoot error:nil];
+    for (NSString *buuid in bundleUUIDs) {
+        NSString *uuidDir = [bundleRoot stringByAppendingPathComponent:buuid];
+        NSArray<NSString *> *subItems = [fm contentsOfDirectoryAtPath:uuidDir error:nil];
+        NSString *appBundlePath = nil;
+        BOOL hasTrollMarker = NO;
+        for (NSString *it in subItems) {
+            if ([it hasSuffix:@".app"]) {
+                appBundlePath = [uuidDir stringByAppendingPathComponent:it];
+            } else if ([it hasPrefix:@"_TrollStore"]) {
+                hasTrollMarker = YES;
+            }
+        }
+        if (!appBundlePath) continue;
+
+        NSData *infoData = read_regular_file_nofollow([appBundlePath stringByAppendingPathComponent:@"Info.plist"], 512 * 1024);
+        if (!infoData) continue;
+        NSDictionary *info = [NSPropertyListSerialization propertyListWithData:infoData options:0 format:NULL error:NULL];
+        if (![info isKindOfClass:[NSDictionary class]]) continue;
+
+        NSString *bid = [info[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? info[@"CFBundleIdentifier"] : @"";
+        NSString *execName = [info[@"CFBundleExecutable"] isKindOfClass:[NSString class]] ? info[@"CFBundleExecutable"] : @"";
+        NSString *dispName = [info[@"CFBundleDisplayName"] isKindOfClass:[NSString class]] ? info[@"CFBundleDisplayName"] :
+                             ([info[@"CFBundleName"] isKindOfClass:[NSString class]] ? info[@"CFBundleName"] : bid);
+        if (bid.length == 0 || execName.length == 0) continue;
+        scannedApps++;
+
+        // Skip our own tool and official TrollStore host
+        if ([bid isEqualToString:@"com.lili.lockdownwhitelist"] ||
+            [bid isEqualToString:@"com.opa334.TrollStore"]) {
+            continue;
+        }
+
+        NSString *execPath = [appBundlePath stringByAppendingPathComponent:execName];
+        NSDictionary *macho = inspect_macho_readonly(execPath);
+        BOOL encrypted = [macho[@"encrypted"] boolValue];
+        BOOL hasReceipt = [fm fileExistsAtPath:[uuidDir stringByAppendingPathComponent:@"StoreKit/receipt"]] ||
+                          [fm fileExistsAtPath:[appBundlePath stringByAppendingPathComponent:@"SC_Info"]];
+        BOOL hasMobileProvision = [fm fileExistsAtPath:[appBundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"]];
+
+        NSString *channel = @"AppStore";
+        if (hasTrollMarker) {
+            channel = @"TrollStore";
+        } else if (!encrypted && (!hasReceipt || hasMobileProvision)) {
+            channel = @"Sideload";
+        }
+        if ([channel isEqualToString:@"AppStore"]) continue;
+        nonAppStoreCount++;
+
+        NSDictionary *ents = [macho[@"entitlements"] isKindOfClass:[NSDictionary class]] ? macho[@"entitlements"] : @{};
+        NSArray<NSString *> *dylibs = [macho[@"dylibs"] isKindOfClass:[NSArray class]] ? macho[@"dylibs"] : @[];
+        BOOL usesPasteboard = [macho[@"usesPasteboard"] boolValue];
+
+        // 3a. Brand Impersonation / Fake Web3 Wallet Drainer (HIGH)
+        if (matches_impersonated_wallet_brand(dispName, bid)) {
+            highCount++;
+            [findings addObject:@{
+                @"id": [NSString stringWithFormat:@"WALLET_%@", bid],
+                @"severity": @"high",
+                @"category": @"疑似仿冒钱包",
+                @"title": [NSString stringWithFormat:@"%@ (%@)", dispName, channel],
+                @"target": bid,
+                @"detail": @"非 App Store 渠道安装的加密钱包应用，极易为二次打包窃取助记词/私钥的 Web3 盗币木马，请立即核实安装包来源！"
+            }];
+        }
+
+        // 3b. Private TCC Prompt Bypass Entitlements (HIGH)
+        id tccAllow = ents[@"com.apple.private.tcc.allow"];
+        BOOL hasTccBypass = ([tccAllow isKindOfClass:[NSArray class]] && [(NSArray *)tccAllow count] > 0) ||
+                            [ents[@"com.apple.private.tcc.allow-prompting-bypass"] boolValue];
+        if (hasTccBypass) {
+            highCount++;
+            [findings addObject:@{
+                @"id": [NSString stringWithFormat:@"TCC_%@", bid],
+                @"severity": @"high",
+                @"category": @"TCC 隐私绕过",
+                @"title": [NSString stringWithFormat:@"%@ (%@)", dispName, channel],
+                @"target": bid,
+                @"detail": @"声明 com.apple.private.tcc.allow 私有免弹窗权限，可静默跳过 iOS 授权弹窗访问相册、麦克风、相机或通讯录。"
+            }];
+        }
+
+        // 3c. Unsandboxed / Root Spawning Privileges on TrollStore / Sideload Apps (MEDIUM)
+        NSMutableArray<NSString *> *privTags = [NSMutableArray array];
+        if ([ents[@"com.apple.private.security.no-sandbox"] boolValue]) [privTags addObject:@"no-sandbox(无沙盒)"];
+        if ([ents[@"com.apple.private.persona-mgmt"] boolValue]) [privTags addObject:@"persona-mgmt(Root派生)"];
+        if ([ents[@"platform-application"] boolValue]) [privTags addObject:@"platform-application(平台特权)"];
+        if (privTags.count > 0) {
+            mediumCount++;
+            [findings addObject:@{
+                @"id": [NSString stringWithFormat:@"PRIV_%@", bid],
+                @"severity": @"medium",
+                @"category": @"巨魔特权审计",
+                @"title": [NSString stringWithFormat:@"%@ (%@)", dispName, channel],
+                @"target": bid,
+                @"detail": [NSString stringWithFormat:@"包含高权限签名：%@。系统增强工具常见，若为普通游戏/娱乐软件请警惕越权窃密。",
+                            [privTags componentsJoinedByString:@"、"]]
+            }];
+        }
+
+        // 3d. Injected Hook Frameworks / Repackaged Dylibs (MEDIUM)
+        NSMutableArray<NSString *> *hookNames = [NSMutableArray array];
+        NSArray<NSString *> *dylibDirItems = [fm contentsOfDirectoryAtPath:[appBundlePath stringByAppendingPathComponent:@"Dylibs"] error:nil];
+        for (NSString *d in dylibDirItems) {
+            if ([d hasSuffix:@".dylib"]) [hookNames addObject:d];
+        }
+        for (NSString *dl in dylibs) {
+            NSString *lowerDl = [dl lowercaseString];
+            if ([lowerDl containsString:@"substrate"] ||
+                [lowerDl containsString:@"ellekit"] ||
+                [lowerDl containsString:@"libhooker"] ||
+                [lowerDl containsString:@"substitute"] ||
+                [lowerDl containsString:@"/dylibs/"]) {
+                [hookNames addObject:[dl lastPathComponent]];
+            }
+        }
+        if (hookNames.count > 0) {
+            mediumCount++;
+            [findings addObject:@{
+                @"id": [NSString stringWithFormat:@"HOOK_%@", bid],
+                @"severity": @"medium",
+                @"category": @"重打包注入库",
+                @"title": [NSString stringWithFormat:@"%@ (%@)", dispName, channel],
+                @"target": bid,
+                @"detail": [NSString stringWithFormat:@"检测到注入动态库/Hook 组件（%@），常见于去广告或改版 IPA，请确认无第三方偷跑脚本。",
+                            [hookNames componentsJoinedByString:@", "]]
+            }];
+        }
+
+        // 3e. Persistent Background Keep-Alive + Pasteboard Access Tuple (MEDIUM)
+        NSArray *bgModes = [info[@"UIBackgroundModes"] isKindOfClass:[NSArray class]] ? info[@"UIBackgroundModes"] : @[];
+        BOOL persistentBg = [bgModes containsObject:@"audio"] || [bgModes containsObject:@"location"] || [bgModes containsObject:@"voip"];
+        if (persistentBg && usesPasteboard) {
+            mediumCount++;
+            [findings addObject:@{
+                @"id": [NSString stringWithFormat:@"CLIP_%@", bid],
+                @"severity": @"medium",
+                @"category": @"后台剪贴板能力",
+                @"title": [NSString stringWithFormat:@"%@ (%@)", dispName, channel],
+                @"target": bid,
+                @"detail": @"非 App Store 应用同时具备后台保活模式（音视频/定位/VoIP）与 UIPasteboard 剪贴板读取符号，建议在系统设置中将其「从其他 App 粘贴」设为询问或拒绝。"
+            }];
+        }
+    }
+
+    print_json(@{
+        @"ok": @YES,
+        @"scannedApps": @(scannedApps),
+        @"nonAppStoreApps": @(nonAppStoreCount),
+        @"highCount": @(highCount),
+        @"mediumCount": @(mediumCount),
+        @"findings": findings
+    });
+    return 0;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 2) {
@@ -720,6 +1391,24 @@ int main(int argc, const char *argv[]) {
         }
         if ([cmd isEqualToString:@"--ioc-scan"]) {
             return cmd_ioc_scan();
+        }
+        if ([cmd isEqualToString:@"--security-audit"]) {
+            return cmd_security_audit();
+        }
+        if ([cmd isEqualToString:@"--devmode-status"]) {
+            return cmd_devmode_status();
+        }
+        if ([cmd isEqualToString:@"--devmode-reveal"]) {
+            return cmd_devmode_reveal();
+        }
+        if ([cmd isEqualToString:@"--devmode-arm"]) {
+            return cmd_devmode_arm();
+        }
+        if ([cmd isEqualToString:@"--devmode-disable"]) {
+            return cmd_devmode_disable();
+        }
+        if ([cmd isEqualToString:@"--reboot"]) {
+            return cmd_reboot_device();
         }
 
         print_json(@{@"ok": @NO, @"error": @"unknown_subcommand"});
