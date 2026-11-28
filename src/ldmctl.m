@@ -660,6 +660,33 @@ static int cmd_ioc_scan(void) {
         }];
     }
 
+    // Also scan /private/var/tmp for GHOSTKNIFE / DarkSword transient staging directory (<uuid>.<digits>/{STORAGE,DATA,TMP})
+    NSString *ghostPath = @"/private/var/tmp/<uuid>.<id>/{STORAGE,DATA,TMP}";
+    BOOL ghostFound = NO;
+    NSArray<NSString *> *tmpEntries = [fm contentsOfDirectoryAtPath:@"/private/var/tmp" error:nil];
+    NSRegularExpression *ghostRe = [NSRegularExpression regularExpressionWithPattern:@"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.[0-9]+$" options:0 error:nil];
+    for (NSString *entry in tmpEntries) {
+        if ([ghostRe numberOfMatchesInString:entry options:0 range:NSMakeRange(0, entry.length)] > 0) {
+            NSString *cand = [@"/private/var/tmp" stringByAppendingPathComponent:entry];
+            BOOL isDir1 = NO, isDir2 = NO, isDir3 = NO;
+            if ([fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"STORAGE"] isDirectory:&isDir1] && isDir1 &&
+                [fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"DATA"] isDirectory:&isDir2] && isDir2 &&
+                [fm fileExistsAtPath:[cand stringByAppendingPathComponent:@"TMP"] isDirectory:&isDir3] && isDir3) {
+                ghostFound = YES;
+                ghostPath = cand;
+                break;
+            }
+        }
+    }
+    if (ghostFound) hits++;
+    [results addObject:@{
+        @"path": ghostPath,
+        @"family": @"DarkSword / GHOSTKNIFE",
+        @"severity": @"high",
+        @"desc": @"内存后门在 /private/var/tmp 下的加密窃密暂存目录结构（重启手机可清除非持久化内存驻留）",
+        @"found": @(ghostFound)
+    }];
+
     print_json(@{
         @"ok": @YES,
         @"clean": @(hits == 0),

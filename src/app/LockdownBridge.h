@@ -8,7 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-#define LB_VERSION "0.2.0"
+#define LB_VERSION "0.2.1"
 #ifndef LB_COMMIT
 #define LB_COMMIT "dev"
 #endif

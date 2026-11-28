@@ -16,15 +16,29 @@ enum URLSafetyInspector {
         "businessvideonews.com", "cloudsponcer.com", "datamarketplace.net",
         "growthtransport.com", "mobilegamerstats.com", "snoweeanalytics.com",
         "tagclick-cdn.com", "topographyupdates.com", "unlimitedteacup.com",
-        "virtuallaughing.com", "web-trackers.com", "senlin83.com", "snlin83.com"
+        "virtuallaughing.com", "web-trackers.com", "senlin83.com", "snlin83.com",
+        // OPTIMJACK (2026-11 Optimizely/Kissmetrics supply-chain Coruna/DarkSword & skimmer cluster)
+        "1688360.cc", "webshell.lol", "linkforge.cc",
+        "5vobauua3ojpklx.icu", "eil786npto9u5bq.icu", "l7bcsnwc7nzr3uo.icu",
+        "je4ft3gn8vxudum.icu", "q1ls1ho9x7wsxlu.icu", "p55abnw2pnsz0bo.icu",
+        "1y69gy2mdzaltz1.icu", "gm38duxoihbmy5o.icu", "ios-hack.icu",
+        // Hijacked polyfill CDN
+        "polyfill.io"
     ]
 
     private static let knownExploitIPs: Set<String> = [
-        "62.72.21.10", "72.60.98.48"
+        "62.72.21.10", "72.60.98.48",
+        "136.113.106.136", "34.87.36.58", "34.96.213.201"
+    ]
+
+    private static let supplyChainExperimentationHosts: Set<String> = [
+        "cdn.optimizely.com", "logx.optimizely.com",
+        "scripts.kissmetrics.com", "i.kissmetrics.com",
+        "cdn.storifyme.com", "apv-launcher.minute.ly", "snippet.minute.ly"
     ]
 
     private static let highAbuseTLDs: Set<String> = [
-        "xyz", "top", "icu", "cyou", "sbs", "cfd", "buzz", "rest", "monster", "pw", "click", "zip", "mov"
+        "xyz", "top", "icu", "lol", "cyou", "sbs", "cfd", "buzz", "rest", "monster", "pw", "click", "zip", "mov"
     ]
 
     private static let protectedBrandRoots: [(keyword: String, officialRoots: Set<String>, label: String)] = [
@@ -32,6 +46,8 @@ enum URLSafetyInspector {
         ("imtoken", ["token.im", "imtoken.com"], "imToken 钱包"),
         ("tokenpocket", ["tokenpocket.pro", "tpstatic.net"], "TokenPocket 钱包"),
         ("trustwallet", ["trustwallet.com"], "Trust Wallet 钱包"),
+        ("ledger", ["ledger.com"], "Ledger 硬件钱包"),
+        ("trezor", ["trezor.io"], "Trezor 硬件钱包"),
         ("binance", ["binance.com", "bnbstatic.com", "binance.info"], "币安 Binance"),
         ("okx", ["okx.com", "static.okx.com"], "欧易 OKX"),
         ("icloud", ["icloud.com", "icloud.com.cn", "apple.com"], "Apple iCloud"),
@@ -335,6 +351,15 @@ enum URLSafetyInspector {
                 detail: "高度吻合 Coruna lazarus 种子生成的备用动态水坑域名格式！"
             ))
         }
+
+        if matchesRegex(#"^https?://[^/]+/(?:JIUJIU888/(?:weifile\.html|index\.js)|A8/a\.html|api/iptj|(?:[a-zA-Z0-9_/.-]+/)?(?:rce_loader|sbox0_main_[0-9.]+|sbx0_main|sbx1_main)\.js)(?:$|[?#])"#, in: full) {
+            findings.append(URLSafetyFinding(
+                severity: .danger,
+                category: "OPTIMJACK / DarkSword 载荷",
+                title: "\(context)命中 iOS 漏洞分发或沙盒逃逸脚本路径",
+                detail: "匹配 2026-11 Optimizely 供应链投毒事件披露的 Coruna/DarkSword 漏洞跳转或沙盒逃逸模块路径！"
+            ))
+        }
     }
 
     private static func checkBrandImpersonation(host: String, findings: inout [URLSafetyFinding]) {
@@ -356,6 +381,7 @@ enum URLSafetyInspector {
     private static func analyzeHTMLAndScripts(html: String, pageHost: String, findings: inout [URLSafetyFinding]) -> [String] {
         let pageRoot = LBBridgeHighLevelDomain(pageHost)
         var scriptDomains = Set<String>()
+        var supplyChainHits = Set<String>()
 
         // 1. Extract <script src="..."> and <iframe src="..."> external URLs
         if let tagRe = try? NSRegularExpression(pattern: #"<(script|iframe)\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>"#, options: [.caseInsensitive]) {
@@ -381,6 +407,9 @@ enum URLSafetyInspector {
                     if extRoot != pageRoot {
                         scriptDomains.insert(h)
                     }
+                    if supplyChainExperimentationHosts.contains(h) {
+                        supplyChainHits.insert(h)
+                    }
                     checkURLAgainstLocalIOCs(u, context: "页面嵌入 <\(tagName)>", findings: &findings)
 
                     // Hidden external iframe check (classic watering-hole loader)
@@ -404,6 +433,16 @@ enum URLSafetyInspector {
                     }
                 }
             }
+        }
+
+        if !supplyChainHits.isEmpty {
+            let joined = supplyChainHits.sorted().joined(separator: ", ")
+            findings.append(URLSafetyFinding(
+                severity: .notice,
+                category: "第三方动态实验脚本",
+                title: "页面嵌入第三方 A/B 实验或营销注入脚本 (\(joined))",
+                detail: "2026-11 Optimizely/Kissmetrics 等第三方脚本曾遭供应链篡改投递换币木马与 Coruna/DarkSword 漏洞链。若需将该站加入 Safari 白名单，请保持 Loon「iOS WebKit 水坑与漏洞链防护」插件开启，已在网络层自动拦截此类第三方动态脚本且不影响主站浏览。"
+            ))
         }
 
         // 2. WebKit / JSC Memory Corruption & JIT Spray Primitives
@@ -437,6 +476,21 @@ enum URLSafetyInspector {
                 category: "助记词/私钥窃取",
                 title: "网页包含索要「助记词 / 私钥 (Seed Phrase)」的输入表单",
                 detail: "任何正规网站或空投活动均不会在网页端索要钱包助记词或明文私钥，100% 为盗币钓鱼页面！"
+            ))
+        }
+
+        // 4. OPTIMJACK Crypto Address Clipper & Payment Card Skimmer Signatures
+        let hasOptimjackMarker = matchesRegex(#"window\._k7\b"#, in: html, caseInsensitive: false) ||
+                                 (matchesRegex(#"/(?:card|hit)\.php\b"#, in: html) && matchesRegex(#"html2canvas"#, in: html))
+        let hasClipboardCryptoSwap = matchesRegex(#"navigator\.clipboard\.writeText"#, in: html, caseInsensitive: false) &&
+                                     matchesRegex(#"0x[a-fA-F0-9]{40}"#, in: html, caseInsensitive: false) &&
+                                     matchesRegex(#"\bbc1[a-zA-HJ-NP-Z0-9]{25,39}\b"#, in: html, caseInsensitive: false)
+        if hasOptimjackMarker || hasClipboardCryptoSwap {
+            findings.append(URLSafetyFinding(
+                severity: .danger,
+                category: "换币木马 / 盗刷卡注入",
+                title: "源码检出加密货币地址替换或银行卡表单窃取特征 (OPTIMJACK)",
+                detail: "检测到 window._k7 驻留标记、剪贴板多链收款地址篡改或网页表单窃密回传特征！"
             ))
         }
 

@@ -12,12 +12,13 @@ URL-REGEX,^https?:\/\/[^\/]+\/(?:[a-zA-Z0-9_\/.-]+\/)?(?:890fff603542c4b4de6508d
 URL-REGEX,^http:\/\/(?:[a-z0-9-]+\.)?[a-z0-9]{15}\.xyz\/,REJECT
 USER-AGENT,PowerManagement%20configd%20plugin*,REJECT
 
-# --- DarkSword (iOS WebKit JavaScriptCore + Kernel Exploit Kit) ---
+# --- DarkSword (iOS WebKit JavaScriptCore + ANGLE/XNU Sandbox Escape Kit) ---
 DOMAIN-SUFFIX,cdncounter.net,REJECT
 DOMAIN-SUFFIX,snapshare.chat,REJECT
 DOMAIN-SUFFIX,chainmate.top,REJECT
 IP-CIDR,62.72.21.10/32,REJECT,no-resolve
 IP-CIDR,72.60.98.48/32,REJECT,no-resolve
+URL-REGEX,^https?:\/\/[^\/]+\/(?:[a-zA-Z0-9_\/.-]+\/)?(?:rce_loader|sbox0_main_[0-9.]+|sbx0_main|sbx1_main)\.js(?:$|[?#]),REJECT
 
 # --- Operation Triangulation (iOS 15 - 16 Exploit Infrastructure) ---
 DOMAIN-SUFFIX,addatamarket.net,REJECT
@@ -37,3 +38,31 @@ DOMAIN-SUFFIX,virtuallaughing.com,REJECT
 DOMAIN-SUFFIX,web-trackers.com,REJECT
 DOMAIN-SUFFIX,senlin83.com,REJECT
 DOMAIN-SUFFIX,snlin83.com,REJECT
+
+# --- OPTIMJACK (2026-11 Optimizely/Kissmetrics Supply-Chain Skimmer & Coruna/DarkSword Routing Cluster) ---
+DOMAIN-SUFFIX,1688360.cc,REJECT
+DOMAIN-SUFFIX,webshell.lol,REJECT
+DOMAIN-SUFFIX,linkforge.cc,REJECT
+DOMAIN-SUFFIX,5vobauua3ojpklx.icu,REJECT
+DOMAIN-SUFFIX,eil786npto9u5bq.icu,REJECT
+DOMAIN-SUFFIX,l7bcsnwc7nzr3uo.icu,REJECT
+DOMAIN-SUFFIX,je4ft3gn8vxudum.icu,REJECT
+DOMAIN-SUFFIX,q1ls1ho9x7wsxlu.icu,REJECT
+DOMAIN-SUFFIX,p55abnw2pnsz0bo.icu,REJECT
+DOMAIN-SUFFIX,1y69gy2mdzaltz1.icu,REJECT
+DOMAIN-SUFFIX,gm38duxoihbmy5o.icu,REJECT
+DOMAIN-SUFFIX,ios-hack.icu,REJECT
+IP-CIDR,136.113.106.136/32,REJECT,no-resolve
+IP-CIDR,34.87.36.58/32,REJECT,no-resolve
+IP-CIDR,34.96.213.201/32,REJECT,no-resolve
+URL-REGEX,^https?:\/\/[^\/]+\/(?:JIUJIU888\/(?:weifile\.html|index\.js)|A8\/a\.html|api\/iptj)(?:$|[?#]),REJECT
+
+# --- High-Risk Third-Party A/B Experimentation & Hijacked Script CDNs (Protects Whitelisted Sites) ---
+DOMAIN,cdn.optimizely.com,REJECT
+DOMAIN,logx.optimizely.com,REJECT
+DOMAIN,scripts.kissmetrics.com,REJECT
+DOMAIN,i.kissmetrics.com,REJECT
+DOMAIN,cdn.storifyme.com,REJECT
+DOMAIN,apv-launcher.minute.ly,REJECT
+DOMAIN,snippet.minute.ly,REJECT
+DOMAIN-SUFFIX,polyfill.io,REJECT

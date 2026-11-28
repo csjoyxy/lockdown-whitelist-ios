@@ -149,8 +149,25 @@ async function runTests() {
     "http://k8m2p9x4q1w7z3r.xyz/check",
     "https://static.cdncounter.net/widgets.js?uhfiu27fajf2948fjfefaa42",
     "https://chainmate.top/",
+    "https://compromised-news.example/stage/sbox0_main_18.4.js",
     "https://backuprabbit.com/stage2",
     "https://tagclick-cdn.com/loader.js",
+    // Nov 2026 OPTIMJACK (Optimizely / Kissmetrics supply-chain Coruna & DarkSword cluster)
+    "https://1688360.cc/track.js",
+    "https://1688360.cc/card.php",
+    "https://webshell.lol/payload.js",
+    "https://linkforge.cc/gate",
+    "https://eil786npto9u5bq.icu/JIUJIU888/weifile.html",
+    "https://l7bcsnwc7nzr3uo.icu/api/iptj",
+    "https://ios-hack.icu/A8/a.html",
+    "https://any-mirror.example/JIUJIU888/index.js?t=1",
+    // Third-party A/B experimentation & hijacked script CDNs
+    "https://cdn.optimizely.com/js/123456789.js",
+    "https://logx.optimizely.com/v1/events",
+    "https://scripts.kissmetrics.com/abcdef.2.js",
+    "https://cdn.storifyme.com/widgets/loader.js",
+    "https://apv-launcher.minute.ly/api/launcher.js",
+    "https://cdn.polyfill.io/v2/polyfill.min.js",
   ];
   for (const badUrl of maliciousSamples) {
     assert(matcher.matchesUrl(badUrl), `Plugin failed to block malicious URL: ${badUrl}`);
@@ -163,6 +180,10 @@ async function runTests() {
     "https://www.apple.com/cn/",
     "https://www.bilibili.com/video/BV1xx411c7mD",
     "https://github.com/csjoyxy/lockdown-whitelist-ios",
+    "https://gitlab.com/explore",
+    "https://zoom.us/download",
+    "https://www.bbc.com/news",
+    "https://www.optimizely.com/insights/",
     "https://chatgpt.com/",
     "https://claude.ai/new",
     "https://mp.weixin.qq.com/s/abcdefg123456",
@@ -174,7 +195,9 @@ async function runTests() {
     assert(!matcher.matchesUrl(goodUrl), `False positive on benign URL: ${goodUrl}`);
     assert(!listMatcher.matchesUrl(goodUrl), `False positive in list on benign URL: ${goodUrl}`);
   }
-  console.log("✓ Malicious exploit kit IOCs blocked (15/15) & benign sites untouched (0 false positives)");
+  console.log(
+    `✓ Malicious exploit kit & supply-chain IOCs blocked (${maliciousSamples.length}/${maliciousSamples.length}) & benign sites untouched (0 false positives)`
+  );
 
   // 5. 自检脚本模拟运行测试（探针被阻断 + DoH 测速通知）
   const posted = [];

@@ -101,7 +101,7 @@ async function runSelfCheck(rawArg) {
   }
 
   const title = canaryBlocked ? "🛡️ iOS WebKit 水坑防护自检通过" : "⚠️ iOS WebKit 水坑防护未完全生效";
-  const subtitle = "Coruna / DarkSword / 三角行动 IOC 防线";
+  const subtitle = "Coruna / DarkSword / OPTIMJACK 供应链防线";
   const body = lines.join("\n");
 
   if (typeof $notification !== "undefined" && $notification && typeof $notification.post === "function") {

@@ -1,5 +1,5 @@
 #!name = iOS WebKit 水坑与漏洞链防护
-#!desc = 面向 iOS 15–17（含 16.4.1）老版本浏览器的零延迟网络防线：精准阻断 Coruna / DarkSword / 三角行动等在野 WebKit 水坑域名、明文植入载荷与 C2 节点（不改全局 DNS、0 MitM、0 额外耗电）
+#!desc = 面向 iOS 15–17（含 16.4.1）老版本浏览器的零延迟网络防线：精准阻断 Coruna / DarkSword / 三角行动 / OPTIMJACK(Optimizely供应链投毒) 水坑域名、漏洞载荷与高危第三方动态注入脚本（不改全局 DNS、0 MitM、0 额外耗电）
 #!author = csjoyxy
 #!homepage = https://github.com/csjoyxy/lockdown-whitelist-ios
 #!icon = https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Lock.png
@@ -7,7 +7,7 @@
 #!system = iOS,iPadOS,macOS
 #!system_version = 15
 #!loon_version = 3.2.0(733)
-#!date = 2026-11-26
+#!date = 2026-11-27
 #!tag = 安全,WebKit,水坑防护,IOC
 #!type = normal
 
@@ -32,12 +32,13 @@ URL-REGEX,^http:\/\/(?:[a-z0-9-]+\.)?[a-z0-9]{15}\.xyz\/,REJECT
 # Coruna 注入系统 powerd 进程后的特征异常 User-Agent 外联阻断
 USER-AGENT,PowerManagement%20configd%20plugin*,REJECT
 
-# 2. DarkSword（iOS WebKit JavaScriptCore RCE + 内核提权全链水坑套件）
+# 2. DarkSword（iOS WebKit JavaScriptCore RCE + ANGLE/XNU 沙盒逃逸全链水坑套件）
 DOMAIN-SUFFIX,cdncounter.net,REJECT
 DOMAIN-SUFFIX,snapshare.chat,REJECT
 DOMAIN-SUFFIX,chainmate.top,REJECT
 IP-CIDR,62.72.21.10/32,REJECT,no-resolve
 IP-CIDR,72.60.98.48/32,REJECT,no-resolve
+URL-REGEX,^https?:\/\/[^\/]+\/(?:[a-zA-Z0-9_\/.-]+\/)?(?:rce_loader|sbox0_main_[0-9.]+|sbx0_main|sbx1_main)\.js(?:$|[?#]),REJECT
 
 # 3. Operation Triangulation（三角行动 iOS 15–16 漏洞利用基础设施，Photon/Gallium 模块被后续套件复用）
 DOMAIN-SUFFIX,addatamarket.net,REJECT
@@ -57,6 +58,34 @@ DOMAIN-SUFFIX,virtuallaughing.com,REJECT
 DOMAIN-SUFFIX,web-trackers.com,REJECT
 DOMAIN-SUFFIX,senlin83.com,REJECT
 DOMAIN-SUFFIX,snlin83.com,REJECT
+
+# 4. OPTIMJACK · 2026-11 Optimizely/Kissmetrics 供应链投毒（换币木马 + 盗刷卡表单 + Coruna/DarkSword 漏洞分发集群）
+DOMAIN-SUFFIX,1688360.cc,REJECT
+DOMAIN-SUFFIX,webshell.lol,REJECT
+DOMAIN-SUFFIX,linkforge.cc,REJECT
+DOMAIN-SUFFIX,5vobauua3ojpklx.icu,REJECT
+DOMAIN-SUFFIX,eil786npto9u5bq.icu,REJECT
+DOMAIN-SUFFIX,l7bcsnwc7nzr3uo.icu,REJECT
+DOMAIN-SUFFIX,je4ft3gn8vxudum.icu,REJECT
+DOMAIN-SUFFIX,q1ls1ho9x7wsxlu.icu,REJECT
+DOMAIN-SUFFIX,p55abnw2pnsz0bo.icu,REJECT
+DOMAIN-SUFFIX,1y69gy2mdzaltz1.icu,REJECT
+DOMAIN-SUFFIX,gm38duxoihbmy5o.icu,REJECT
+DOMAIN-SUFFIX,ios-hack.icu,REJECT
+IP-CIDR,136.113.106.136/32,REJECT,no-resolve
+IP-CIDR,34.87.36.58/32,REJECT,no-resolve
+IP-CIDR,34.96.213.201/32,REJECT,no-resolve
+URL-REGEX,^https?:\/\/[^\/]+\/(?:JIUJIU888\/(?:weifile\.html|index\.js)|A8\/a\.html|api\/iptj)(?:$|[?#]),REJECT
+
+# 5. 高危第三方 A/B 实验与营销动态脚本源阻断（防白名单正规大站被供应链投毒连坐，不影响主站核心功能）
+DOMAIN,cdn.optimizely.com,REJECT
+DOMAIN,logx.optimizely.com,REJECT
+DOMAIN,scripts.kissmetrics.com,REJECT
+DOMAIN,i.kissmetrics.com,REJECT
+DOMAIN,cdn.storifyme.com,REJECT
+DOMAIN,apv-launcher.minute.ly,REJECT
+DOMAIN,snippet.minute.ly,REJECT
+DOMAIN-SUFFIX,polyfill.io,REJECT
 
 [Script]
 generic script-path=https://raw.githubusercontent.com/csjoyxy/lockdown-whitelist-ios/main/scripts/webkit_shield_check.js,timeout=12,tag=立即自检防护与安全DoH延迟,img-url=checkmark.shield.fill.system,argument=[{check_doh}]

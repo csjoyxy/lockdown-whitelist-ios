@@ -659,8 +659,8 @@ struct IOCScannerTabView: View {
                 }
 
                 Section(
-                    header: Text("Coruna / PLASMAGRID (iOS 13–17.2.1) 水坑落盘指标"),
-                    footer: Text("数据来源：Google Threat Intelligence (GTIG) 与 iVerify 披露的在野 iOS WebKit 水坑攻击链特征库。")
+                    header: Text("Coruna / PLASMAGRID / GHOSTKNIFE 水坑与后门落盘指标"),
+                    footer: Text("数据来源：Google Threat Intelligence (GTIG)、iVerify 与 Report URI 披露的在野 iOS WebKit 水坑与后门特征库。")
                 ) {
                     ForEach(vm.iocItems) { item in
                         HStack(alignment: .top, spacing: 10) {
